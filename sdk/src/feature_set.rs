@@ -880,6 +880,11 @@ impl Default for FeatureSet {
 }
 impl FeatureSet {
     pub fn is_active(&self, feature_id: &Pubkey) -> bool {
+        if feature_id == &enable_early_verification_of_account_modifications::id()
+            || feature_id == &bpf_account_data_direct_mapping::id()
+        {
+            return true;
+        }
         self.active.contains_key(feature_id)
     }
 
