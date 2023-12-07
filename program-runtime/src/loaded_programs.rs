@@ -422,6 +422,10 @@ impl LoadedProgramsForTxBatch {
             self.replenish(*key, entry.clone());
         })
     }
+
+    pub fn merge_consuming(&mut self, other: Self) {
+        self.entries.extend(other.entries.into_iter());
+    }
 }
 
 #[derive(PartialEq)]
