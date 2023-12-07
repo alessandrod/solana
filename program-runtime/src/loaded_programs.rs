@@ -536,22 +536,18 @@ impl LoadedPrograms {
     }
 
     pub fn prune_by_deployment_slot(&mut self, slot: Slot) {
-        self.entries.retain(|_key, second_level| {
-            second_level.fork_versions = second_level
+        for second_level in self.entries.values_mut() {
+            second_level
                 .fork_versions
-                .iter()
-                .filter(|entry| entry.deployment_slot != slot)
-                .cloned()
-                .collect();
-            !second_level.fork_versions.is_empty()
-        });
+                .retain(|entry| entry.deployment_slot != slot);
+        }
         self.remove_programs_with_no_entries();
     }
 
     /// Before rerooting the blockstore this removes all programs of orphan forks
     pub fn prune<F: ForkGraph>(&mut self, fork_graph: &F, new_root: Slot) {
         let previous_root = self.latest_root;
-        self.entries.retain(|_key, second_level| {
+        for second_level in self.entries.values_mut() {
             let mut first_ancestor_found = false;
             second_level.fork_versions = second_level
                 .fork_versions
@@ -575,8 +571,7 @@ impl LoadedPrograms {
                 .cloned()
                 .collect();
             second_level.fork_versions.reverse();
-            !second_level.fork_versions.is_empty()
-        });
+        }
 
         self.remove_expired_entries(new_root);
         self.remove_programs_with_no_entries();
