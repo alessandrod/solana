@@ -636,15 +636,13 @@ impl LoadedPrograms {
                             }
 
                             if current_slot >= entry.effective_slot {
-                                let mut usage_count =
-                                    entry.tx_usage_counter.load(Ordering::Relaxed);
-                                saturating_add_assign!(usage_count, count);
-                                entry.tx_usage_counter.store(usage_count, Ordering::Relaxed);
+                                entry.tx_usage_counter.fetch_add(count, Ordering::Relaxed);
                                 return Some((key, entry.clone()));
                             } else if entry.is_implicit_delay_visibility_tombstone(current_slot) {
                                 // Found a program entry on the current fork, but it's not effective
                                 // yet. It indicates that the program has delayed visibility. Return
                                 // the tombstone to reflect that.
+                                entry.tx_usage_counter.fetch_add(count, Ordering::Relaxed);
                                 return Some((
                                     key,
                                     Arc::new(LoadedProgram::new_tombstone(
