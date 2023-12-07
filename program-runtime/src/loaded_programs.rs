@@ -1890,7 +1890,7 @@ mod tests {
 
         // New root 15 should evict the expired entry for program1
         cache.prune(&fork_graph, 15);
-        assert!(cache.entries.get(&program1).is_none());
+        assert!(cache.entries.get(&program1).unwrap().fork_versions.is_empty());
     }
 
     #[test]
