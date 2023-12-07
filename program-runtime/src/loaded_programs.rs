@@ -350,6 +350,7 @@ impl LoadedProgram {
 #[derive(Debug, Default)]
 struct SecondLevel {
     fork_versions: Vec<Arc<LoadedProgram>>,
+    loaded_by: Option<(Slot, std::thread::ThreadId)>,
 }
 
 #[derive(Debug, Default)]
@@ -616,13 +617,14 @@ impl LoadedPrograms {
     /// Extracts a subset of the programs relevant to a transaction batch
     /// and returns which program accounts the accounts DB needs to load.
     pub fn extract<S: WorkingSlot>(
-        &self,
+        &mut self,
         working_slot: &S,
         search_for: &mut Vec<(Pubkey, (LoadedProgramMatchCriteria, u64))>,
-    ) -> LoadedProgramsForTxBatch {
+    ) -> (LoadedProgramsForTxBatch, Option<(Pubkey, u64)>) {
+        let mut program_to_load = None;
         let mut found = HashMap::new();
         search_for.retain(|(key, (match_criteria, count))| {
-            if let Some(second_level) = self.entries.get(&key) {
+            if let Some(second_level) = self.entries.get_mut(&key) {
                 for entry in second_level.fork_versions.iter().rev() {
                     let current_slot = working_slot.current_slot();
                     if entry.deployment_slot <= self.latest_root
@@ -656,6 +658,19 @@ impl LoadedPrograms {
                     }
                 }
             }
+            if program_to_load.is_none() {
+                // We have not selected a loading task yet
+                let second_level = self
+                    .entries
+                    .entry(*key)
+                    .or_insert_with(SecondLevel::default);
+                if second_level.loaded_by.is_none() {
+                    // Select this missing entry which is not selected by any other TX batch yet
+                    program_to_load = Some((*key, *count));
+                    second_level.loaded_by =
+                        Some((working_slot.current_slot(), std::thread::current().id()));
+                }
+            }
             true
         });
         self.stats
@@ -664,10 +679,30 @@ impl LoadedPrograms {
         self.stats
             .hits
             .fetch_add(found.len() as u64, Ordering::Relaxed);
-        LoadedProgramsForTxBatch {
-            entries: found,
-            slot: working_slot.current_slot(),
-        }
+        (
+            LoadedProgramsForTxBatch {
+                entries: found,
+                slot: working_slot.current_slot(),
+            },
+            program_to_load,
+        )
+    }
+
+    /// Called by Bank::replenish_program_cache() for each program that is done loading
+    pub fn finish_cooperative_loading_task(
+        &mut self,
+        slot: Slot,
+        key: Pubkey,
+        loaded_program: Arc<LoadedProgram>,
+    ) {
+        let second_level = self.entries.entry(key).or_insert_with(SecondLevel::default);
+        debug_assert_eq!(
+            second_level.loaded_by,
+            Some((slot, std::thread::current().id()))
+        );
+        second_level.loaded_by = None;
+        let (was_occupied, _entry) = self.replenish(key, loaded_program);
+        debug_assert!(!was_occupied);
     }
 
     pub fn merge(&mut self, tx_batch_cache: &LoadedProgramsForTxBatch) {
@@ -782,8 +817,9 @@ impl LoadedPrograms {
 
     fn remove_programs_with_no_entries(&mut self) {
         let num_programs_before_removal = self.entries.len();
-        self.entries
-            .retain(|_, second_level| !second_level.fork_versions.is_empty());
+        self.entries.retain(|_, second_level| {
+            !second_level.fork_versions.is_empty() || second_level.loaded_by.is_some()
+        });
         if self.entries.len() < num_programs_before_removal {
             self.stats.empty_entries.fetch_add(
                 num_programs_before_removal.saturating_sub(self.entries.len()) as u64,
@@ -1455,7 +1491,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 3)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 4)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 20, 22));
         assert!(match_slot(&found, &program4, 0, 22));
@@ -1471,7 +1507,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 15));
         assert!(match_slot(&found, &program2, 11, 15));
@@ -1495,7 +1531,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 18));
         assert!(match_slot(&found, &program2, 11, 18));
@@ -1513,7 +1549,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 23));
         assert!(match_slot(&found, &program2, 11, 23));
@@ -1531,7 +1567,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 11));
         // program2 was updated at slot 11, but is not effective till slot 12. The result should contain a tombstone.
@@ -1565,7 +1601,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 19));
         assert!(match_slot(&found, &program2, 11, 19));
@@ -1583,7 +1619,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 21));
         assert!(match_slot(&found, &program2, 11, 21));
@@ -1621,7 +1657,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         // Since the fork was pruned, we should not find the entry deployed at slot 20.
         assert!(match_slot(&found, &program1, 0, 22));
@@ -1638,7 +1674,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 27));
         assert!(match_slot(&found, &program2, 11, 27));
@@ -1670,7 +1706,7 @@ mod tests {
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program4, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 23));
         assert!(match_slot(&found, &program2, 11, 23));
@@ -1722,7 +1758,7 @@ mod tests {
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 12));
         assert!(match_slot(&found, &program2, 11, 12));
@@ -1741,7 +1777,7 @@ mod tests {
             ),
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program2, 11, 12));
 
@@ -1806,7 +1842,7 @@ mod tests {
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         // Program1 deployed at slot 11 should not be expired yet
         assert!(match_slot(&found, &program1, 11, 12));
@@ -1822,7 +1858,7 @@ mod tests {
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program3, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program2, 11, 15));
 
@@ -1883,7 +1919,7 @@ mod tests {
 
         let working_slot = TestWorkingSlot::new(20, &[0, 10, 20]);
         let mut missing = vec![(program1, (LoadedProgramMatchCriteria::NoCriteria, 1))];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         // The cache should have the program deployed at slot 0
         assert_eq!(
@@ -1926,7 +1962,7 @@ mod tests {
             (program1, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 20));
         assert!(match_slot(&found, &program2, 10, 20));
@@ -1936,7 +1972,7 @@ mod tests {
             (program1, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 5, 6));
         assert!(missing.contains(&(program2, (LoadedProgramMatchCriteria::NoCriteria, 1))));
@@ -1950,7 +1986,7 @@ mod tests {
             (program1, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 20));
         assert!(match_slot(&found, &program2, 10, 20));
@@ -1960,7 +1996,7 @@ mod tests {
             (program1, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 6));
         assert!(missing.contains(&(program2, (LoadedProgramMatchCriteria::NoCriteria, 1))));
@@ -1974,7 +2010,7 @@ mod tests {
             (program1, (LoadedProgramMatchCriteria::NoCriteria, 1)),
             (program2, (LoadedProgramMatchCriteria::NoCriteria, 1)),
         ];
-        let found = cache.extract(&working_slot, &mut missing);
+        let (found, _program_to_load) = cache.extract(&working_slot, &mut missing);
 
         assert!(match_slot(&found, &program1, 0, 20));
         assert!(missing.contains(&(program2, (LoadedProgramMatchCriteria::NoCriteria, 1))));
