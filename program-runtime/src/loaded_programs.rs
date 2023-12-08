@@ -1,3 +1,5 @@
+use std::sync::{Condvar, Mutex};
+
 #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
 use solana_rbpf::error::EbpfError;
 use {
@@ -353,6 +355,53 @@ struct SecondLevel {
     loaded_by: Option<(Slot, std::thread::ThreadId)>,
 }
 
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct LoadingTaskCookie(u64);
+
+impl LoadingTaskCookie {
+    fn new() -> Self {
+        Self(0)
+    }
+
+    fn update(&mut self) {
+        let LoadingTaskCookie(cookie) = self;
+        *cookie = cookie.wrapping_add(1);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LoadingTaskWaiter {
+    cookie: Mutex<LoadingTaskCookie>,
+    cond: Condvar,
+}
+
+impl LoadingTaskWaiter {
+    pub fn new() -> Self {
+        Self {
+            cookie: Mutex::new(LoadingTaskCookie::new()),
+            cond: Condvar::new(),
+        }
+    }
+
+    pub fn cookie(&self) -> LoadingTaskCookie {
+        *self.cookie.lock().unwrap()
+    }
+
+    pub fn notify(&self) {
+        let mut cookie = self.cookie.lock().unwrap();
+        cookie.update();
+        self.cond.notify_all();
+    }
+
+    pub fn wait(&self, cookie: LoadingTaskCookie) -> LoadingTaskCookie {
+        let cookie_guard = self.cookie.lock().unwrap();
+        *self
+            .cond
+            .wait_while(cookie_guard, |current_cookie| *current_cookie == cookie)
+            .unwrap()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LoadedPrograms {
     /// A two level index:
@@ -363,6 +412,7 @@ pub struct LoadedPrograms {
     pub program_runtime_environment_v1: Arc<BuiltinProgram<InvokeContext<'static>>>,
     latest_root: Slot,
     pub stats: Stats,
+    pub loading_task_waiter: Arc<LoadingTaskWaiter>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -698,6 +748,8 @@ impl LoadedPrograms {
         second_level.loaded_by = None;
         let (was_occupied, _entry) = self.replenish(key, loaded_program);
         debug_assert!(!was_occupied);
+
+        self.loading_task_waiter.notify();
     }
 
     pub fn merge(&mut self, tx_batch_cache: &LoadedProgramsForTxBatch) {
