@@ -115,6 +115,7 @@ use {
         },
         time::Duration,
     },
+    tokio::task,
 };
 
 pub mod account_resolver;
@@ -441,7 +442,7 @@ impl JsonRpcRequestProcessor {
         Ok(new_response(&bank, response))
     }
 
-    pub fn get_multiple_accounts(
+    pub async fn get_multiple_accounts(
         &self,
         pubkeys: Vec<Pubkey>,
         config: Option<RpcAccountInfoConfig>,
@@ -458,10 +459,17 @@ impl JsonRpcRequestProcessor {
         })?;
         let encoding = encoding.unwrap_or(UiAccountEncoding::Base64);
 
-        let accounts = pubkeys
-            .into_iter()
-            .map(|pubkey| get_encoded_account(&bank, &pubkey, encoding, data_slice, None))
-            .collect::<Result<Vec<_>>>()?;
+        let mut accounts = Vec::with_capacity(pubkeys.len());
+        for pubkey in pubkeys {
+            let bank = Arc::clone(&bank);
+            accounts.push(
+                task::spawn_blocking(move || {
+                    get_encoded_account(&bank, &pubkey, encoding, data_slice, None)
+                })
+                .await
+                .expect("rpc: get_encoded_account panicked")?,
+            );
+        }
         Ok(new_response(&bank, accounts))
     }
 
@@ -3017,7 +3025,7 @@ pub mod rpc_accounts {
             meta: Self::Metadata,
             pubkey_strs: Vec<String>,
             config: Option<RpcAccountInfoConfig>,
-        ) -> Result<RpcResponse<Vec<Option<UiAccount>>>>;
+        ) -> BoxFuture<Result<RpcResponse<Vec<Option<UiAccount>>>>>;
 
         #[rpc(meta, name = "getBlockCommitment")]
         fn get_block_commitment(
@@ -3067,7 +3075,7 @@ pub mod rpc_accounts {
             meta: Self::Metadata,
             pubkey_strs: Vec<String>,
             config: Option<RpcAccountInfoConfig>,
-        ) -> Result<RpcResponse<Vec<Option<UiAccount>>>> {
+        ) -> BoxFuture<Result<RpcResponse<Vec<Option<UiAccount>>>>> {
             debug!(
                 "get_multiple_accounts rpc request received: {:?}",
                 pubkey_strs.len()
@@ -3078,15 +3086,19 @@ pub mod rpc_accounts {
                 .max_multiple_accounts
                 .unwrap_or(MAX_MULTIPLE_ACCOUNTS);
             if pubkey_strs.len() > max_multiple_accounts {
-                return Err(Error::invalid_params(format!(
+                return Box::pin(future::err(Error::invalid_params(format!(
                     "Too many inputs provided; max {max_multiple_accounts}"
-                )));
+                ))));
             }
             let pubkeys = pubkey_strs
                 .into_iter()
                 .map(|pubkey_str| verify_pubkey(&pubkey_str))
-                .collect::<Result<Vec<_>>>()?;
-            meta.get_multiple_accounts(pubkeys, config)
+                .collect::<Result<Vec<_>>>();
+            let pubkeys = match pubkeys {
+                Ok(pubkeys) => pubkeys,
+                Err(err) => return Box::pin(future::err(err)),
+            };
+            Box::pin(async move { meta.get_multiple_accounts(pubkeys, config).await })
         }
 
         fn get_block_commitment(
