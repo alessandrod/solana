@@ -328,12 +328,12 @@ impl StakedNodes {
     }
 
     #[inline]
-    pub(super) fn min_stake(&self) -> u64 {
+    pub fn min_stake(&self) -> u64 {
         self.min_stake
     }
 
     #[inline]
-    pub(super) fn max_stake(&self) -> u64 {
+    pub fn max_stake(&self) -> u64 {
         self.max_stake
     }
 }

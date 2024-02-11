@@ -1155,7 +1155,6 @@ impl ConnectionTable {
     }
 }
 
-#[cfg(test)]
 pub mod test {
     use {
         super::*,
@@ -1164,7 +1163,6 @@ pub mod test {
             quic::{MAX_STAKED_CONNECTIONS, MAX_UNSTAKED_CONNECTIONS},
             tls_certificates::new_dummy_x509_certificate,
         },
-        assert_matches::assert_matches,
         async_channel::unbounded as async_unbounded,
         crossbeam_channel::{unbounded, Receiver},
         quinn::{ClientConfig, IdleTimeout, TransportConfig},
@@ -1223,7 +1221,7 @@ pub mod test {
         config
     }
 
-    fn setup_quic_server(
+    pub fn setup_quic_server(
         option_staked_nodes: Option<StakedNodes>,
         max_connections_per_peer: usize,
     ) -> (
@@ -1233,14 +1231,14 @@ pub mod test {
         SocketAddr,
         Arc<StreamStats>,
     ) {
-        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let s = UdpSocket::bind("127.0.0.1:42069").unwrap();
         let exit = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = unbounded();
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(option_staked_nodes.unwrap_or_default()));
         let (_, stats, t) = spawn_server(
-            "quic_streamer_test",
+            "one-million-sol",
             s,
             &keypair,
             sender,
@@ -1256,7 +1254,7 @@ pub mod test {
         (t, exit, receiver, server_address, stats)
     }
 
-    pub async fn make_client_endpoint(
+    pub async fn make_client_connection(
         addr: &SocketAddr,
         client_keypair: Option<&Keypair>,
     ) -> Connection {
@@ -1279,8 +1277,26 @@ pub mod test {
             .expect("Failed in waiting")
     }
 
+    pub fn make_client_endpoint(
+        client_keypair: Option<&Keypair>,
+    ) -> Endpoint {
+        let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut endpoint = quinn::Endpoint::new(
+            EndpointConfig::default(),
+            None,
+            client_socket,
+            Arc::new(TokioRuntime),
+        )
+        .unwrap();
+        let default_keypair = Keypair::new();
+        endpoint.set_default_client_config(get_client_config(
+            client_keypair.unwrap_or(&default_keypair),
+        ));
+        endpoint
+    }
+
     pub async fn check_timeout(receiver: Receiver<PacketBatch>, server_address: SocketAddr) {
-        let conn1 = make_client_endpoint(&server_address, None).await;
+        let conn1 = make_client_connection(&server_address, None).await;
         let total = 30;
         for i in 0..total {
             let mut s1 = conn1.open_uni().await.unwrap();
@@ -1304,8 +1320,8 @@ pub mod test {
     }
 
     pub async fn check_block_multiple_connections(server_address: SocketAddr) {
-        let conn1 = make_client_endpoint(&server_address, None).await;
-        let conn2 = make_client_endpoint(&server_address, None).await;
+        let conn1 = make_client_connection(&server_address, None).await;
+        let conn2 = make_client_connection(&server_address, None).await;
         let mut s1 = conn1.open_uni().await.unwrap();
         let s2 = conn2.open_uni().await;
         if let Ok(mut s2) = s2 {
@@ -1322,10 +1338,9 @@ pub mod test {
                 .await
                 .expect_err("shouldn't be able to open 2 connections");
         } else {
-            // It has been noticed if there is already connection open against the server, this open_uni can fail
-            // with ApplicationClosed(ApplicationClose) error due to CONNECTION_CLOSE_CODE_TOO_MANY before writing to
-            // the stream -- expect it.
-            assert_matches!(s2, Err(quinn::ConnectionError::ApplicationClosed(_)));
+
+            // nyms - got rid of unstable import for testing
+            unimplemented!();
         }
     }
 
@@ -1333,8 +1348,8 @@ pub mod test {
         receiver: Receiver<PacketBatch>,
         server_address: SocketAddr,
     ) {
-        let conn1 = Arc::new(make_client_endpoint(&server_address, None).await);
-        let conn2 = Arc::new(make_client_endpoint(&server_address, None).await);
+        let conn1 = Arc::new(make_client_connection(&server_address, None).await);
+        let conn2 = Arc::new(make_client_connection(&server_address, None).await);
         let mut num_expected_packets = 0;
         for i in 0..10 {
             info!("sending: {}", i);
@@ -1376,7 +1391,7 @@ pub mod test {
         server_address: SocketAddr,
         client_keypair: Option<&Keypair>,
     ) {
-        let conn1 = Arc::new(make_client_endpoint(&server_address, client_keypair).await);
+        let conn1 = Arc::new(make_client_connection(&server_address, client_keypair).await);
 
         // Send a full size packet with single byte writes.
         let num_bytes = PACKET_DATA_SIZE;
@@ -1412,7 +1427,7 @@ pub mod test {
     }
 
     pub async fn check_unstaked_node_connect_failure(server_address: SocketAddr) {
-        let conn1 = Arc::new(make_client_endpoint(&server_address, None).await);
+        let conn1 = Arc::new(make_client_connection(&server_address, None).await);
 
         // Send a full size packet with single byte writes.
         if let Ok(mut s1) = conn1.open_uni().await {
@@ -1493,7 +1508,7 @@ pub mod test {
         solana_logger::setup();
         let (t, exit, _receiver, server_address, stats) = setup_quic_server(None, 1);
 
-        let conn1 = make_client_endpoint(&server_address, None).await;
+        let conn1 = make_client_connection(&server_address, None).await;
         assert_eq!(stats.total_streams.load(Ordering::Relaxed), 0);
         assert_eq!(stats.total_stream_read_timeouts.load(Ordering::Relaxed), 0);
 
