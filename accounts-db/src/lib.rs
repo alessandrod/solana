@@ -32,6 +32,7 @@ pub mod inline_spl_token_2022;
 pub mod partitioned_rewards;
 mod pubkey_bins;
 mod read_only_accounts_cache;
+mod ring;
 mod rolling_bit_field;
 pub mod secondary_index;
 pub mod shared_buffer_reader;
