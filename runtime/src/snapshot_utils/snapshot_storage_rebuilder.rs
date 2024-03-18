@@ -85,9 +85,12 @@ impl SnapshotStorageRebuilder {
                 "unsupported snapshot version '{snapshot_version_str}': {err}",
             ))
         })?;
+
+        log::error!("PROCESSING SNAPSHOT FILE");
         let snapshot_storage_lengths =
             Self::process_snapshot_file(snapshot_version, snapshot_file_path)?;
 
+        log::error!("SPAWNING THREADS");
         let account_storage_map = Self::spawn_rebuilder_threads(
             file_receiver,
             num_threads,
@@ -171,6 +174,7 @@ impl SnapshotStorageRebuilder {
                 panic!("did not receive snapshot file from unpacking threads");
             }
         }
+        eprintln!("HAVE SHIT");
         let snapshot_version_path = snapshot_version_path.unwrap();
         let snapshot_file_path = snapshot_file_path.unwrap();
 

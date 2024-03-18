@@ -32,7 +32,7 @@ use {
         cmp::Ordering,
         collections::{HashMap, HashSet},
         fmt, fs,
-        io::{BufReader, BufWriter, Error as IoError, Read, Result as IoResult, Seek, Write},
+        io::{self, BufReader, BufWriter, Error as IoError, Read, Result as IoResult, Seek, Write},
         num::NonZeroUsize,
         path::{Path, PathBuf},
         process::ExitStatus,
@@ -48,6 +48,14 @@ use {
 use {
     hardened_unpack::UnpackedAppendVecMap, rayon::prelude::*,
     solana_accounts_db::utils::create_accounts_run_and_snapshot_dirs,
+};
+#[cfg(target_os = "linux")]
+use {
+    solana_accounts_db::{
+        huge_pages::HugePagesBuffer,
+        ring::{io_uring_supported, seq_file_reader::SequentialFileReader},
+    },
+    std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt},
 };
 
 mod archive_format;
@@ -1380,39 +1388,68 @@ fn streaming_unarchive_snapshot(
     snapshot_archive_path: PathBuf,
     archive_format: ArchiveFormat,
     num_threads: usize,
-) -> Vec<JoinHandle<()>> {
+) {
     let account_paths = Arc::new(account_paths);
     let ledger_dir = Arc::new(ledger_dir);
+
+    #[cfg(target_os = "linux")]
+    if io_uring_supported() {
+        let file_sender = file_sender.clone();
+        let account_paths = Arc::clone(&account_paths);
+        let ledger_dir = Arc::clone(&ledger_dir);
+        let snapshot_archive_path = snapshot_archive_path.clone();
+        let _ = Builder::new()
+            .name(format!("solUnpkSnpsht0"))
+            .spawn(move || {
+                let read_capacity = 1024 * 1024;
+                let entries = 64;
+                let mut buf = HugePagesBuffer::new(read_capacity * entries * 2).unwrap();
+                let mut archive = Archive::new(untar_snapshot_create_ring_file_reader(
+                    &snapshot_archive_path,
+                    archive_format,
+                    read_capacity,
+                    &mut buf,
+                ));
+                log::error!("GOING URINGGGG");
+                return hardened_unpack::streaming_unpack_snapshot(
+                    &mut archive,
+                    ledger_dir.as_path(),
+                    &account_paths,
+                    None,
+                    &file_sender,
+                )
+                .unwrap();
+            })
+            .unwrap();
+        return;
+    }
+
     let shared_buffer = untar_snapshot_create_shared_buffer(&snapshot_archive_path, archive_format);
 
     // All shared buffer readers need to be created before the threads are spawned
     #[allow(clippy::needless_collect)]
     let archives: Vec<_> = (0..num_threads)
         .map(|_| {
+            panic!();
             let reader = SharedBufferReader::new(&shared_buffer);
             Archive::new(reader)
         })
         .collect();
 
-    archives
-        .into_iter()
-        .enumerate()
-        .map(|(thread_index, archive)| {
-            let parallel_selector = Some(ParallelSelector {
-                index: thread_index,
-                divisions: num_threads,
-            });
-
-            spawn_unpack_snapshot_thread(
-                file_sender.clone(),
-                account_paths.clone(),
-                ledger_dir.clone(),
-                archive,
-                parallel_selector,
-                thread_index,
-            )
-        })
-        .collect()
+    for (thread_index, archive) in archives.into_iter().enumerate() {
+        let parallel_selector = Some(ParallelSelector {
+            index: thread_index,
+            divisions: num_threads,
+        });
+        let _ = spawn_unpack_snapshot_thread(
+            file_sender.clone(),
+            account_paths.clone(),
+            ledger_dir.clone(),
+            archive,
+            parallel_selector,
+            thread_index,
+        );
+    }
 }
 
 /// BankSnapshotInfo::new_from_dir() requires a few meta files to accept a snapshot dir
@@ -2033,6 +2070,7 @@ fn untar_snapshot_create_shared_buffer(
     snapshot_tar: &Path,
     archive_format: ArchiveFormat,
 ) -> SharedBuffer {
+    panic!();
     let open_file = || {
         fs::File::open(snapshot_tar)
             .map_err(|err| {
@@ -2053,6 +2091,58 @@ fn untar_snapshot_create_shared_buffer(
             SharedBuffer::new(lz4::Decoder::new(BufReader::new(open_file())).unwrap())
         }
         ArchiveFormat::Tar => SharedBuffer::new(BufReader::new(open_file())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn untar_snapshot_create_ring_file_reader<'a>(
+    snapshot_tar: &Path,
+    archive_format: ArchiveFormat,
+    read_capacity: usize,
+    buf: &'a mut [u8],
+) -> SnapshotReader<'a> {
+    let file = {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT | libc::O_NOATIME)
+            .open(snapshot_tar)
+            .map_err(|err| {
+                IoError::other(format!(
+                    "failed to open snapshot archive '{}': {err}",
+                    snapshot_tar.display(),
+                ))
+            })
+            .unwrap();
+        SequentialFileReader::new(file, buf, read_capacity).unwrap()
+    };
+    match archive_format {
+        ArchiveFormat::TarBzip2 => SnapshotReader::TarBzip2(BzDecoder::new(file)),
+        ArchiveFormat::TarGzip => SnapshotReader::TarGzip(GzDecoder::new(file)),
+        ArchiveFormat::TarZstd => {
+            SnapshotReader::TarZstd(zstd::stream::read::Decoder::with_buffer(file).unwrap())
+        }
+        ArchiveFormat::TarLz4 => SnapshotReader::TarLz4(lz4::Decoder::new(file).unwrap()),
+        ArchiveFormat::Tar => SnapshotReader::Tar(file),
+    }
+}
+
+enum SnapshotReader<'a> {
+    TarBzip2(BzDecoder<SequentialFileReader<'a>>),
+    TarGzip(GzDecoder<SequentialFileReader<'a>>),
+    TarZstd(zstd::stream::read::Decoder<'a, SequentialFileReader<'a>>),
+    TarLz4(lz4::Decoder<SequentialFileReader<'a>>),
+    Tar(SequentialFileReader<'a>),
+}
+
+impl<'a> Read for SnapshotReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            SnapshotReader::TarBzip2(reader) => reader.read(buf),
+            SnapshotReader::TarGzip(reader) => reader.read(buf),
+            SnapshotReader::TarZstd(reader) => reader.read(buf),
+            SnapshotReader::TarLz4(reader) => reader.read(buf),
+            SnapshotReader::Tar(reader) => reader.read(buf),
+        }
     }
 }
 

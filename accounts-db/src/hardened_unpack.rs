@@ -1,4 +1,5 @@
 use {
+    crate::{huge_pages::HugePagesBuffer, ring::unpacker::RingUnpacker},
     bzip2::bufread::BzDecoder,
     log::*,
     rand::{thread_rng, Rng},
@@ -102,6 +103,27 @@ where
     let mut actual_total_size: u64 = 0;
     let mut total_count: u64 = 0;
 
+    #[cfg(target_os = "linux")]
+    let (write_capacity, ring_entries) = (1024 * 1024, 512);
+
+    #[cfg(target_os = "linux")]
+    let mut unpack_buf = HugePagesBuffer::new(ring_entries * write_capacity);
+
+    #[cfg(target_os = "linux")]
+    let (mut ring_unpacker, entry_processor) = match unpack_buf.as_mut() {
+        Ok(buf) => (
+            RingUnpacker::new(buf, write_capacity, entry_processor).ok(),
+            None,
+        ),
+        Err(err) => {
+            warn!("Failed to allocate huge pages for unpacking: {}", err);
+            (None, Some(entry_processor))
+        }
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let entry_processor = Some(entry_processor);
+
     let mut total_entries = 0;
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -175,21 +197,31 @@ where
             continue; // skip it
         };
 
-        let unpack = entry.unpack(&entry_path);
+        let unpack = if let Some(unpacker) = ring_unpacker.as_mut() {
+            entry.unpack_with(&entry_path, unpacker)
+        } else {
+            entry.unpack(&entry_path)
+        };
         check_unpack_result(unpack.map(|_unpack| true)?, path_str)?;
 
-        // Sanitize permissions.
-        let mode = match entry.header().entry_type() {
-            GNUSparse | Regular => 0o644,
-            _ => 0o755,
-        };
-        set_perms(&entry_path, mode)?;
-
-        // Process entry after setting permissions
-        entry_processor(entry_path);
+        if ring_unpacker.is_none() {
+            // Sanitize permissions.
+            let mode = match entry.header().entry_type() {
+                GNUSparse | Regular => 0o644,
+                _ => 0o755,
+            };
+            set_perms(&entry_path, mode)?;
+            // Process entry after setting permissions
+            (entry_processor.as_ref().unwrap())(entry_path);
+        }
 
         total_entries += 1;
     }
+
+    if let Some(unpacker) = ring_unpacker {
+        unpacker.drain()?;
+    }
+
     info!("unpacked {} entries total", total_entries);
 
     return Ok(());

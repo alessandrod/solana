@@ -3,6 +3,9 @@ inherits = "release"
 debug = true
 split-debuginfo = "packed"
 
+[profile.release]
+debug = 2
+
 [workspace]
 members = [
     "account-decoder",
@@ -224,6 +227,7 @@ im = "15.1.0"
 index_list = "0.2.11"
 indexmap = "2.2.5"
 indicatif = "0.17.8"
+ioprio = "0.2.0"
 io-uring = "0.6.3"
 itertools = "0.10.5"
 jemallocator = { package = "tikv-jemallocator", version = "0.4.1", features = [
@@ -563,3 +567,6 @@ rev = "b500cdc2a920cd5bff9e2dd974d7b97349d61464"
 [patch.crates-io.tokio]
 git = "https://github.com/solana-labs/solana-tokio.git"
 rev = "7cf47705faacf7bf0e43e4131a5377b3291fce21"
+
+[patch.crates-io.tar]
+path = "/home/sol/src/tar-rs"
