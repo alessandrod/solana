@@ -18,6 +18,7 @@
 //! tracks the number of commits to the entire data store. So the latest
 //! commit for each slot entry would be indexed.
 
+use itertools::Itertools;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -892,10 +893,7 @@ impl<'a> LoadedAccountAccessor<'a> {
                 // get account meta from the storage entry here
                 maybe_storage_entry
                     .as_ref()
-                    .and_then(|(storage_entry, offset)| {
-                        storage_entry
-                            .get_stored_account(*offset)
-                    })
+                    .and_then(|(storage_entry, offset)| storage_entry.get_stored_account(*offset))
             }
         }
     }
@@ -2649,7 +2647,12 @@ impl AccountsDb {
 
         let mut reclaim_result = ReclaimResult::default();
         self.handle_reclaims(
-            (!reclaim_vecs.is_empty()).then(|| reclaim_vecs.iter().flatten()),
+            (!reclaim_vecs.is_empty()).then(|| {
+                reclaim_vecs
+                    .iter()
+                    .flatten()
+                    .sorted_by_key(|(_slot, info)| (info.store_id(), info.offset()))
+            }),
             None,
             Some((&self.clean_accounts_stats.purge_stats, &mut reclaim_result)),
             reset_accounts,
@@ -2960,7 +2963,9 @@ impl AccountsDb {
                             dirty_ancient_stores.fetch_add(1, Ordering::Relaxed);
                         }
                         oldest_dirty_slot = oldest_dirty_slot.min(*slot);
-                        store.accounts.pubkey_iter(|k| {pubkeys.insert(*k);});
+                        store.accounts.pubkey_iter(|k| {
+                            pubkeys.insert(*k);
+                        });
                     });
                     oldest_dirty_slot
                 })
@@ -7972,7 +7977,14 @@ impl AccountsDb {
         let mut dead_slots = IntSet::default();
         let mut new_shrink_candidates = ShrinkCandidates::default();
         let mut measure = Measure::start("remove");
+        let mut store_id = 0;
+        let mut store_offset = 0;
         for (slot, account_info) in reclaims {
+            if store_id != account_info.store_id() {
+                store_id = account_info.store_id();
+                store_offset = 0;
+            }
+
             // No cached accounts should make it here
             assert!(!account_info.is_cached());
             if let Some(ref mut reclaimed_offsets) = reclaimed_offsets {
@@ -7994,7 +8006,10 @@ impl AccountsDb {
                     store.slot(), *slot
                 );
                 let offset = account_info.offset();
-                let stored_size = store.accounts.get_account_size(offset).unwrap();
+                let stored_size = store
+                    .accounts
+                    .get_account_size_relative(offset - store_offset)
+                    .unwrap();
                 let count = store.remove_account(stored_size, reset_accounts);
                 if count == 0 {
                     self.dirty_stores.insert(*slot, store.clone());

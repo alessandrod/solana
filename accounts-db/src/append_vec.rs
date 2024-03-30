@@ -559,10 +559,7 @@ struct AccountOffsets {
 }
 
 impl AppendVec {
-    fn next_account_offset(
-        start_offset: usize,
-        stored_meta: &StoredMeta,
-    ) -> AccountOffsets {
+    fn next_account_offset(start_offset: usize, stored_meta: &StoredMeta) -> AccountOffsets {
         let next_after_stored_meta = start_offset + std::mem::size_of::<StoredMeta>();
         let start_of_data = next_after_stored_meta
             + std::mem::size_of::<AccountMeta>()
@@ -615,103 +612,139 @@ impl AppendVec {
         }
     }
 
-    pub fn get_stored_account(&self, offset: usize) -> Option<AccountSharedData> {
-            let binding = self.map.read().unwrap();
-            use solana_sdk::account::WritableAccount;
-            if binding.is_some() {
-                let map = binding.as_ref().unwrap();
-                let m2 = AppendVecMap {
-                    map: &map,
-                    current_len: &self.current_len,
-                    file_size: self.file_size,
-                };
-                let (meta, next): (&StoredMeta, _) = m2.get_type(offset)?;
-                let (account_meta, next): (&AccountMeta, _) = m2.get_type(next)?;
-                let (hash, next): (&AccountHash, _) = m2.get_type(next)?;
-                let (data, next) = m2.get_slice(next, meta.data_len as usize)?;
-                let stored_size = next - offset;
-                Some(
-                    AccountSharedData::create(
-                        account_meta.lamports,
-                        data.to_vec(),
-                        account_meta.owner,
-                        account_meta.executable,
-                        account_meta.rent_epoch,
-                    )
-                )
-            } else {
-                let mut read_buffer = [0u8; 400];
-                assert_eq!(offset % 8, 0);
-                self.loads.fetch_add(1, Ordering::Relaxed);
-                let mut binding = self.file.write().unwrap();
-                let size_of_metas = std::mem::size_of::<StoredMeta>() + std::mem::size_of::<AccountMeta>();
-                let file = &mut binding.as_mut().unwrap().raw;
-                if self.len() < offset + size_of_metas {
-                    return None;
-                }
-                let bytes_to_read = read_buffer.len().min(self.len() - offset);
-                file.seek(SeekFrom::Start(offset as u64)).unwrap();
-                file.read(&mut read_buffer[..bytes_to_read]).unwrap();
-                let m2 = AppendVecMap {
-                    map: &read_buffer,
-                    current_len: &self.current_len,
-                    file_size: self.file_size,
-                };
-                let (meta, next): (&StoredMeta, _) = m2.get_type(0)?;
-                let (account_meta, next): (&AccountMeta, _) = m2.get_type(next)?;
-                let nexts = Self::next_account_offset(0, meta);
-                if nexts.stored_size <= bytes_to_read {
-                    // we got all data in 1 read
-                    let data = &read_buffer[nexts.start_of_data..nexts.offset_to_end_of_data];
-                    assert_eq!(data.len(), meta.data_len as usize);
-                    return Some(AccountSharedData::create(
-                        account_meta.lamports,
-                        data.to_vec(),
-                        account_meta.owner,
-                        account_meta.executable,
-                        account_meta.rent_epoch,
-                    ));
-                }
-                // we have to read the data separately because data is too large
-                let nexts = Self::next_account_offset(0, meta);
-                if self.len() < (offset + nexts.start_of_data + meta.data_len as usize)
-                    || meta.data_len as usize > self.len()
-                {
-                    return None;
-                }
-                let data_got_already = &read_buffer[nexts.start_of_data..bytes_to_read];
-                let mut data = vec![0; meta.data_len as usize];
-                data[..data_got_already.len()].copy_from_slice(data_got_already);
-                file.read(&mut data[data_got_already.len()..]).unwrap();
+    pub fn get_account_size_relative(&self, offset: usize) -> Option<usize> {
+        let binding = self.map.read().unwrap();
 
-                let verify = false;
-                if verify {
-                    let mut data2 = vec![0; meta.data_len as usize];
-                    file.seek(SeekFrom::Start((offset + nexts.start_of_data) as u64)).unwrap();
-                    file.read(&mut data2[..]).unwrap();
-                    if data2 != data {
-                        let mut i = 0;
-                        for k in 0..data2.len() {
-                            if data2[k] != data[k] {
-                                log::error!("i where wrong: {k}, data len: {}, bytes to read: {bytes_to_read}, start of data: {}, data_got_already: {}, read remainder: {}", meta.data_len,
+        if binding.is_some() {
+            todo!()
+        } else {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            let mut binding = self.file.write().unwrap();
+            let file = &mut binding.as_mut().unwrap().small;
+            // if self.len() < offset + std::mem::size_of::<StoredMeta>() {
+            //     return None;
+            // }
+            file.seek_relative(offset as i64).unwrap();
+            let mut stored_meta = [0u8; std::mem::size_of::<StoredMeta>()];
+
+            file.read(&mut stored_meta).unwrap();
+            let m2 = AppendVecMap {
+                map: &stored_meta,
+                current_len: &self.current_len,
+                file_size: self.file_size,
+            };
+            let (stored_meta, _): (&StoredMeta, _) = m2.get_type(0)?;
+            let nexts = Self::next_account_offset(0, stored_meta);
+            Some(nexts.stored_size)
+        }
+    }
+
+    pub fn get_stored_account(&self, offset: usize) -> Option<AccountSharedData> {
+        let binding = self.map.read().unwrap();
+        use solana_sdk::account::WritableAccount;
+        if binding.is_some() {
+            let map = binding.as_ref().unwrap();
+            let m2 = AppendVecMap {
+                map: &map,
+                current_len: &self.current_len,
+                file_size: self.file_size,
+            };
+            let (meta, next): (&StoredMeta, _) = m2.get_type(offset)?;
+            let (account_meta, next): (&AccountMeta, _) = m2.get_type(next)?;
+            let (hash, next): (&AccountHash, _) = m2.get_type(next)?;
+            let (data, next) = m2.get_slice(next, meta.data_len as usize)?;
+            let stored_size = next - offset;
+            Some(AccountSharedData::create(
+                account_meta.lamports,
+                data.to_vec(),
+                account_meta.owner,
+                account_meta.executable,
+                account_meta.rent_epoch,
+            ))
+        } else {
+            let mut read_buffer = [0u8; 400];
+            assert_eq!(offset % 8, 0);
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            let mut binding = self.file.write().unwrap();
+            let size_of_metas =
+                std::mem::size_of::<StoredMeta>() + std::mem::size_of::<AccountMeta>();
+            let file = &mut binding.as_mut().unwrap().raw;
+            if self.len() < offset + size_of_metas {
+                return None;
+            }
+            let bytes_to_read = read_buffer.len().min(self.len() - offset);
+            file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            file.read(&mut read_buffer[..bytes_to_read]).unwrap();
+            let m2 = AppendVecMap {
+                map: &read_buffer,
+                current_len: &self.current_len,
+                file_size: self.file_size,
+            };
+            let (meta, next): (&StoredMeta, _) = m2.get_type(0)?;
+            let (account_meta, next): (&AccountMeta, _) = m2.get_type(next)?;
+            let nexts = Self::next_account_offset(0, meta);
+            if nexts.stored_size <= bytes_to_read {
+                // we got all data in 1 read
+                let data = &read_buffer[nexts.start_of_data..nexts.offset_to_end_of_data];
+                assert_eq!(data.len(), meta.data_len as usize);
+                return Some(AccountSharedData::create(
+                    account_meta.lamports,
+                    data.to_vec(),
+                    account_meta.owner,
+                    account_meta.executable,
+                    account_meta.rent_epoch,
+                ));
+            }
+            // we have to read the data separately because data is too large
+            let nexts = Self::next_account_offset(0, meta);
+            if self.len() < (offset + nexts.start_of_data + meta.data_len as usize)
+                || meta.data_len as usize > self.len()
+            {
+                return None;
+            }
+            let data_got_already = &read_buffer[nexts.start_of_data..bytes_to_read];
+            let mut data = vec![0; meta.data_len as usize];
+            data[..data_got_already.len()].copy_from_slice(data_got_already);
+            file.read(&mut data[data_got_already.len()..]).unwrap();
+
+            let verify = false;
+            if verify {
+                let mut data2 = vec![0; meta.data_len as usize];
+                file.seek(SeekFrom::Start((offset + nexts.start_of_data) as u64))
+                    .unwrap();
+                file.read(&mut data2[..]).unwrap();
+                if data2 != data {
+                    let mut i = 0;
+                    for k in 0..data2.len() {
+                        if data2[k] != data[k] {
+                            log::error!("i where wrong: {k}, data len: {}, bytes to read: {bytes_to_read}, start of data: {}, data_got_already: {}, read remainder: {}", meta.data_len,
                             nexts.start_of_data, data_got_already.len(), (&mut data[data_got_already.len()..]).len());
                             break;
-                            }
                         }
                     }
-                    assert_eq!(data2, data, "{:?}", (data2.len(), data.len(), offset, nexts.start_of_data, meta.data_len));
                 }
-
-                Some(
-                    AccountSharedData::create(
-                        account_meta.lamports,
-                        data.to_vec(),
-                        account_meta.owner,
-                        account_meta.executable,
-                        account_meta.rent_epoch,
+                assert_eq!(
+                    data2,
+                    data,
+                    "{:?}",
+                    (
+                        data2.len(),
+                        data.len(),
+                        offset,
+                        nexts.start_of_data,
+                        meta.data_len
                     )
-                )
+                );
             }
+
+            Some(AccountSharedData::create(
+                account_meta.lamports,
+                data.to_vec(),
+                account_meta.owner,
+                account_meta.executable,
+                account_meta.rent_epoch,
+            ))
+        }
     }
 
     /// Return stored account metadata for the account at `offset` if its data doesn't overrun
@@ -914,7 +947,8 @@ impl AppendVec {
                     });
                     let mut amount = dummy.len() - data_remaining;
                     amount = amount.min(self.len() - dummy_offset);
-                    file.read(&mut dummy[data_remaining..(data_remaining+amount)]).unwrap();
+                    file.read(&mut dummy[data_remaining..(data_remaining + amount)])
+                        .unwrap();
                     dummy_offset += amount;
                     data_remaining += amount;
                     offset_within_dummy = 0;
@@ -943,8 +977,7 @@ impl AppendVec {
                     // we've already read the data we want to skip
                     data_remaining -= skip;
                     offset_within_dummy += skip;
-                }
-                else {
+                } else {
                     // we haven't read all the data we want to skip
                     skip -= data_remaining;
                     data_remaining = 0;

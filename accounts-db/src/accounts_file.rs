@@ -61,7 +61,7 @@ impl AccountsFile {
     pub fn release_map(&self) {
         match self {
             Self::AppendVec(av) => av.release_map(),
-            Self::TieredStorage(_) => todo!(""),//Ok(()),
+            Self::TieredStorage(_) => todo!(""), //Ok(()),
         }
     }
     /// Create an AccountsFile instance from the specified path.
@@ -132,20 +132,29 @@ impl AccountsFile {
                 .map(|(metas, index_offset)| (metas, index_offset.0 as usize)),
         }
     }
-    pub fn get_account_shared_data(&self, index: usize) -> Option<solana_sdk::account::AccountSharedData> {
+    pub fn get_account_shared_data(
+        &self,
+        index: usize,
+    ) -> Option<solana_sdk::account::AccountSharedData> {
         match self {
             Self::AppendVec(av) => av.get_stored_account(index),
             Self::TieredStorage(ts) => todo!(""),
         }
     }
-    
+
     pub fn get_account_size(&self, index: usize) -> Option<usize> {
         match self {
             Self::AppendVec(av) => av.get_account_size(index),
             Self::TieredStorage(ts) => todo!(""),
         }
     }
-    
+
+    pub fn get_account_size_relative(&self, index: usize) -> Option<usize> {
+        match self {
+            Self::AppendVec(av) => av.get_account_size_relative(index),
+            Self::TieredStorage(ts) => todo!(""),
+        }
+    }
 
     pub fn account_matches_owners(
         &self,
@@ -249,10 +258,15 @@ impl<'a> Iterator for AccountsFileIter<'a> {
         if let Some((account, next_offset)) = self.file_entry.get_account(self.offset) {
             self.offset = next_offset;
             if self.offset < 130 {
-                log::error!("next.offset: {}, size: {}, data len: {}", self.offset, account.stored_size(), account.data_len());
+                log::error!(
+                    "next.offset: {}, size: {}, data len: {}",
+                    self.offset,
+                    account.stored_size(),
+                    account.data_len()
+                );
                 panic!("offset: {}", self.offset);
             }
-    
+
             Some(account)
         } else {
             None
