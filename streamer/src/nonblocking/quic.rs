@@ -12,6 +12,7 @@ use {
     },
     bytes::Bytes,
     crossbeam_channel::Sender,
+    futures::FutureExt as _,
     indexmap::map::{Entry, IndexMap},
     percentage::Percentage,
     quinn::{Connecting, Connection, Endpoint, EndpointConfig, TokioRuntime, VarInt},
@@ -33,7 +34,7 @@ use {
     std::{
         iter::repeat_with,
         net::{IpAddr, SocketAddr, UdpSocket},
-        // CAUTION: be careful not to introduce any awaits while holding an RwLock.
+        pin::pin,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
@@ -49,6 +50,7 @@ use {
         // but if we do, the scope of the RwLock must always be a subset of the async Mutex
         // (i.e. lock order is always async Mutex -> RwLock). Also, be careful not to
         // introduce any other awaits while holding the RwLock.
+        runtime::{Handle, Runtime},
         sync::{Mutex, MutexGuard},
         task::JoinHandle,
         time::timeout,
@@ -74,6 +76,7 @@ const CONNECTION_CLOSE_REASON_TOO_MANY: &[u8] = b"too_many";
 
 // A sequence of bytes that is part of a packet
 // along with where in the packet it is
+#[derive(Debug)]
 struct PacketChunk {
     pub bytes: Bytes,
     // The offset of these bytes in the Quic stream
@@ -91,6 +94,7 @@ struct PacketChunk {
 // packet metadata. We use this accumulator to avoid
 // multiple copies of the Bytes (when building up
 // the Packet and then when copying the Packet into a PacketBatch)
+#[derive(Debug)]
 struct PacketAccumulator {
     pub meta: Meta,
     pub chunks: Vec<PacketChunk>,
@@ -121,21 +125,76 @@ pub fn spawn_server(
     max_unstaked_connections: usize,
     wait_for_chunk_timeout: Duration,
     coalesce: Duration,
-) -> Result<(Endpoint, Arc<StreamStats>, JoinHandle<()>), QuicServerError> {
+) -> Result<(Endpoint, Arc<StreamStats>, Arc<Runtime>, JoinHandle<()>), QuicServerError> {
+    spawn_server_multi(
+        name,
+        vec![sock],
+        keypair,
+        packet_sender,
+        exit,
+        max_connections_per_peer,
+        staked_nodes,
+        max_staked_connections,
+        max_unstaked_connections,
+        wait_for_chunk_timeout,
+        coalesce,
+    )
+    .map(|(mut endpoints, stats, runtime, handle)| (endpoints.remove(0), stats, runtime, handle))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_server_multi(
+    name: &'static str,
+    sock: Vec<UdpSocket>,
+    keypair: &Keypair,
+    packet_sender: Sender<PacketBatch>,
+    exit: Arc<AtomicBool>,
+    max_connections_per_peer: usize,
+    staked_nodes: Arc<RwLock<StakedNodes>>,
+    max_staked_connections: usize,
+    max_unstaked_connections: usize,
+    wait_for_chunk_timeout: Duration,
+    coalesce: Duration,
+) -> Result<
+    (
+        Vec<Endpoint>,
+        Arc<StreamStats>,
+        Arc<Runtime>,
+        JoinHandle<()>,
+    ),
+    QuicServerError,
+> {
     info!("Start {name} quic server on {sock:?}");
     let (config, _cert) = configure_server(keypair)?;
 
-    let endpoint = Endpoint::new(
-        EndpointConfig::default(),
-        Some(config),
-        sock,
-        Arc::new(TokioRuntime),
-    )
-    .map_err(QuicServerError::EndpointFailed)?;
+    let endpoints = sock
+        .into_iter()
+        .map(|sock| {
+            Endpoint::new(
+                EndpointConfig::default(),
+                Some(config.clone()),
+                sock,
+                Arc::new(TokioRuntime),
+            )
+            .map_err(QuicServerError::EndpointFailed)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let stats = Arc::<StreamStats>::default();
+    let connection_runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_name("connection_runtime")
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+    // XXX: flip this to try separate runtime
+    // let connection_runtime_handle = connection_runtime.handle().clone();
+    let connection_runtime_handle = tokio::runtime::Handle::current();
     let handle = tokio::spawn(run_server(
+        connection_runtime_handle,
         name,
-        endpoint.clone(),
+        endpoints.clone(),
         packet_sender,
         exit,
         max_connections_per_peer,
@@ -146,13 +205,14 @@ pub fn spawn_server(
         wait_for_chunk_timeout,
         coalesce,
     ));
-    Ok((endpoint, stats, handle))
+    Ok((endpoints, stats, connection_runtime, handle))
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_server(
+    connection_runtime: Handle,
     name: &'static str,
-    incoming: Endpoint,
+    incoming: Vec<Endpoint>,
     packet_sender: Sender<PacketBatch>,
     exit: Arc<AtomicBool>,
     max_connections_per_peer: usize,
@@ -175,7 +235,8 @@ async fn run_server(
     let staked_connection_table: Arc<Mutex<ConnectionTable>> =
         Arc::new(Mutex::new(ConnectionTable::new()));
     let (sender, receiver) = async_unbounded();
-    tokio::spawn(packet_batch_sender(
+    // FIXME: use connection_runtime
+    connection_runtime.spawn(packet_batch_sender(
         packet_sender,
         receiver,
         exit.clone(),
@@ -183,7 +244,12 @@ async fn run_server(
         coalesce,
     ));
     while !exit.load(Ordering::Relaxed) {
-        let timeout_connection = timeout(WAIT_FOR_CONNECTION_TIMEOUT, incoming.accept()).await;
+        let futures = incoming.iter().map(|incoming| Box::pin(incoming.accept()));
+        let incoming = futures::future::select_all(futures).map(|(fut, i, _)| {
+            // eprintln!("accept on {i}");
+            fut
+        });
+        let timeout_connection = timeout(WAIT_FOR_CONNECTION_TIMEOUT, incoming).await;
 
         if last_datapoint.elapsed().as_secs() >= 5 {
             stats.report(name);
@@ -193,6 +259,7 @@ async fn run_server(
         if let Ok(Some(connection)) = timeout_connection {
             info!("Got a connection {:?}", connection.remote_address());
             tokio::spawn(setup_connection(
+                connection_runtime.clone(),
                 connection,
                 unstaked_connection_table.clone(),
                 staked_connection_table.clone(),
@@ -322,6 +389,7 @@ impl NewConnectionHandlerParams {
 }
 
 fn handle_and_cache_new_connection(
+    connection_runtime: Handle,
     connection: Connection,
     mut connection_table_l: MutexGuard<ConnectionTable>,
     connection_table: Arc<Mutex<ConnectionTable>>,
@@ -364,19 +432,35 @@ fn handle_and_cache_new_connection(
             )
         {
             drop(connection_table_l);
-            tokio::spawn(handle_connection(
-                connection,
-                remote_addr,
-                last_update,
-                connection_table,
-                stream_exit,
-                params.clone(),
-                wait_for_chunk_timeout,
-                stream_load_ema,
-                stream_counter,
-            ));
+            if params.peer_type.is_staked() {
+                // FIXME: use connection_runtime
+                connection_runtime.spawn(handle_connection(
+                    connection,
+                    remote_addr,
+                    last_update,
+                    connection_table,
+                    stream_exit,
+                    params.clone(),
+                    wait_for_chunk_timeout,
+                    stream_load_ema,
+                    stream_counter,
+                ));
+            } else {
+                tokio::spawn(handle_connection(
+                    connection,
+                    remote_addr,
+                    last_update,
+                    connection_table,
+                    stream_exit,
+                    params.clone(),
+                    wait_for_chunk_timeout,
+                    stream_load_ema,
+                    stream_counter,
+                ));
+            }
             Ok(())
         } else {
+            // log::error!("FAILEDD");
             params
                 .stats
                 .connection_add_failed
@@ -384,6 +468,7 @@ fn handle_and_cache_new_connection(
             Err(ConnectionHandlerError::ConnectionAddError)
         }
     } else {
+        log::error!("MAXXX");
         connection.close(
             CONNECTION_CLOSE_CODE_EXCEED_MAX_STREAM_COUNT.into(),
             CONNECTION_CLOSE_REASON_EXCEED_MAX_STREAM_COUNT,
@@ -397,6 +482,7 @@ fn handle_and_cache_new_connection(
 }
 
 async fn prune_unstaked_connections_and_add_new_connection(
+    connection__runtime: Handle,
     connection: Connection,
     connection_table: Arc<Mutex<ConnectionTable>>,
     max_connections: usize,
@@ -410,6 +496,7 @@ async fn prune_unstaked_connections_and_add_new_connection(
         let mut connection_table = connection_table.lock().await;
         prune_unstaked_connection_table(&mut connection_table, max_connections, stats);
         handle_and_cache_new_connection(
+            connection__runtime,
             connection,
             connection_table,
             connection_table_clone,
@@ -471,6 +558,7 @@ fn compute_recieve_window(
 
 #[allow(clippy::too_many_arguments)]
 async fn setup_connection(
+    connection_runtime: Handle,
     connecting: Connecting,
     unstaked_connection_table: Arc<Mutex<ConnectionTable>>,
     staked_connection_table: Arc<Mutex<ConnectionTable>>,
@@ -527,6 +615,7 @@ async fn setup_connection(
 
                         if connection_table_l.total_size < max_staked_connections {
                             if let Ok(()) = handle_and_cache_new_connection(
+                                connection_runtime,
                                 new_connection,
                                 connection_table_l,
                                 staked_connection_table.clone(),
@@ -543,6 +632,7 @@ async fn setup_connection(
                             // put this connection in the unstaked connection table. If needed, prune a
                             // connection from the unstaked connection table.
                             if let Ok(()) = prune_unstaked_connections_and_add_new_connection(
+                                connection_runtime,
                                 new_connection,
                                 unstaked_connection_table.clone(),
                                 max_unstaked_connections,
@@ -567,6 +657,7 @@ async fn setup_connection(
                     }
                     ConnectionPeerType::Unstaked => {
                         if let Ok(()) = prune_unstaked_connections_and_add_new_connection(
+                            connection_runtime,
                             new_connection,
                             unstaked_connection_table.clone(),
                             max_unstaked_connections,
@@ -688,12 +779,25 @@ async fn packet_batch_sender(
                 break;
             }
 
-            let timeout_res = timeout(Duration::from_micros(250), packet_receiver.recv()).await;
+            let timeout_res = timeout(
+                coalesce.saturating_sub(Instant::now() - batch_start_time),
+                packet_receiver.recv(),
+            )
+            .await;
+
+            match timeout_res {
+                Ok(Err(e)) => {
+                    log::error!("RECV ERROR {e:?}");
+                }
+                _ => {}
+            }
 
             if let Ok(Ok(packet_accumulator)) = timeout_res {
                 // Start the timeout from when the packet batch first becomes non-empty
                 if packet_batch.is_empty() {
                     batch_start_time = Instant::now();
+                    // log::error!("STARTING TIMER");
+                } else {
                 }
 
                 unsafe {
@@ -778,12 +882,19 @@ async fn handle_connection(
                             .clamp(Duration::from_millis(10), Duration::from_secs(1));
                         let mut start = Instant::now();
                         while !stream_exit.load(Ordering::Relaxed) {
-                            if let Ok(chunk) = tokio::time::timeout(
+                            let res = tokio::time::timeout(
                                 exit_check_interval,
                                 stream.read_chunk(PACKET_DATA_SIZE, false),
                             )
-                            .await
-                            {
+                            .await;
+                            /// XXXX: here: read_chunk stops returning chunks,
+                            /// so we don't feed packet_sender
+                            if let ConnectionPeerType::Staked(_) = params.peer_type {
+                                if res.is_err() {
+                                    log::error!("TIMEOUT");
+                                }
+                            }
+                            if let Ok(chunk) = res {
                                 if handle_chunk(
                                     chunk,
                                     &mut maybe_batch,
@@ -816,6 +927,9 @@ async fn handle_connection(
                 }
             }
         }
+    }
+    if let ConnectionPeerType::Staked(_) = params.peer_type {
+        log::error!("CONNECTION EXIT");
     }
 
     let removed_connection_count = connection_table.lock().await.remove_connection(
@@ -1172,7 +1286,10 @@ pub mod test {
             signature::Keypair,
             signer::Signer,
         },
-        std::collections::HashMap,
+        std::{
+            collections::HashMap,
+            os::fd::{AsRawFd as _, FromRawFd},
+        },
         tokio::time::sleep,
     };
 
@@ -1225,21 +1342,57 @@ pub mod test {
         option_staked_nodes: Option<StakedNodes>,
         max_connections_per_peer: usize,
     ) -> (
+        Arc<Runtime>,
         JoinHandle<()>,
         Arc<AtomicBool>,
         crossbeam_channel::Receiver<PacketBatch>,
         SocketAddr,
         Arc<StreamStats>,
     ) {
-        let s = UdpSocket::bind("127.0.0.1:42069").unwrap();
+        let sockets = (0..100)
+            .map(|_| {
+                let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+                let rc = unsafe {
+                    let value = 1;
+                    libc::setsockopt(
+                        socket,
+                        libc::SOL_SOCKET,
+                        libc::SO_REUSEPORT,
+                        &value as *const _ as _,
+                        std::mem::size_of_val(&value) as _,
+                    )
+                };
+                let port: u16 = 42069;
+                let addr = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as libc::sa_family_t,
+                    sin_port: port.to_be(),
+                    sin_addr: libc::in_addr {
+                        s_addr: libc::INADDR_LOOPBACK.to_be(),
+                    },
+                    sin_zero: [0; 8],
+                };
+
+                // Bind the socket
+                let bind_result = unsafe {
+                    libc::bind(
+                        socket,
+                        &addr as *const _ as *const libc::sockaddr,
+                        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                };
+                eprintln!("BIND {bind_result}");
+                unsafe { UdpSocket::from_raw_fd(socket) }
+            })
+            .collect::<Vec<_>>();
+
         let exit = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = unbounded();
         let keypair = Keypair::new();
-        let server_address = s.local_addr().unwrap();
+        let server_address = sockets[0].local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(option_staked_nodes.unwrap_or_default()));
-        let (_, stats, t) = spawn_server(
+        let (_, stats, runtime, t) = spawn_server_multi(
             "one-million-sol",
-            s,
+            sockets,
             &keypair,
             sender,
             exit.clone(),
@@ -1251,7 +1404,7 @@ pub mod test {
             DEFAULT_TPU_COALESCE,
         )
         .unwrap();
-        (t, exit, receiver, server_address, stats)
+        (runtime, t, exit, receiver, server_address, stats)
     }
 
     pub async fn make_client_connection(
@@ -1277,9 +1430,7 @@ pub mod test {
             .expect("Failed in waiting")
     }
 
-    pub fn make_client_endpoint(
-        client_keypair: Option<&Keypair>,
-    ) -> Endpoint {
+    pub fn make_client_endpoint(client_keypair: Option<&Keypair>) -> Endpoint {
         let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut endpoint = quinn::Endpoint::new(
             EndpointConfig::default(),
@@ -1338,7 +1489,6 @@ pub mod test {
                 .await
                 .expect_err("shouldn't be able to open 2 connections");
         } else {
-
             // nyms - got rid of unstable import for testing
             unimplemented!();
         }

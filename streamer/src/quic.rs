@@ -38,6 +38,7 @@ impl SkipClientVerification {
 
 pub struct SpawnServerResult {
     pub endpoint: Endpoint,
+    pub runtime: Arc<Runtime>,
     pub thread: thread::JoinHandle<()>,
     pub key_updater: Arc<EndpointKeyUpdater>,
 }
@@ -445,7 +446,7 @@ pub fn spawn_server(
     coalesce: Duration,
 ) -> Result<SpawnServerResult, QuicServerError> {
     let runtime = rt(format!("{thread_name}Rt"));
-    let (endpoint, _stats, task) = {
+    let (endpoint, _stats, server_runtime, task) = {
         let _guard = runtime.enter();
         crate::nonblocking::quic::spawn_server(
             metrics_name,
@@ -474,6 +475,7 @@ pub fn spawn_server(
     };
     Ok(SpawnServerResult {
         endpoint,
+        runtime: server_runtime,
         thread: handle,
         key_updater: Arc::new(updater),
     })
@@ -490,6 +492,7 @@ mod test {
     };
 
     fn setup_quic_server() -> (
+        Arc<Runtime>,
         std::thread::JoinHandle<()>,
         Arc<AtomicBool>,
         crossbeam_channel::Receiver<PacketBatch>,
@@ -503,6 +506,7 @@ mod test {
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
         let SpawnServerResult {
             endpoint: _,
+            runtime,
             thread: t,
             key_updater: _,
         } = spawn_server(
@@ -520,12 +524,12 @@ mod test {
             DEFAULT_TPU_COALESCE,
         )
         .unwrap();
-        (t, exit, receiver, server_address)
+        (runtime, t, exit, receiver, server_address)
     }
 
     #[test]
     fn test_quic_server_exit() {
-        let (t, exit, _receiver, _server_address) = setup_quic_server();
+        let (runtime, t, exit, _receiver, _server_address) = setup_quic_server();
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -533,7 +537,7 @@ mod test {
     #[test]
     fn test_quic_timeout() {
         solana_logger::setup();
-        let (t, exit, receiver, server_address) = setup_quic_server();
+        let (runtime, t, exit, receiver, server_address) = setup_quic_server();
         let runtime = rt("solQuicTestRt".to_string());
         runtime.block_on(check_timeout(receiver, server_address));
         exit.store(true, Ordering::Relaxed);
@@ -562,6 +566,7 @@ mod test {
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
         let SpawnServerResult {
             endpoint: _,
+            runtime,
             thread: t,
             key_updater: _,
         } = spawn_server(
@@ -608,6 +613,7 @@ mod test {
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
         let SpawnServerResult {
             endpoint: _,
+            runtime,
             thread: t,
             key_updater: _,
         } = spawn_server(
