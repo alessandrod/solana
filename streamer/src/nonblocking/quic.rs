@@ -1349,7 +1349,7 @@ pub mod test {
         SocketAddr,
         Arc<StreamStats>,
     ) {
-        let sockets = (0..100)
+        let sockets = (0..10)
             .map(|_| {
                 let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
                 let rc = unsafe {
