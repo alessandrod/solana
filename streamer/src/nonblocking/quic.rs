@@ -54,6 +54,7 @@ use {
         // but if we do, the scope of the RwLock must always be a subset of the async Mutex
         // (i.e. lock order is always async Mutex -> RwLock). Also, be careful not to
         // introduce any other awaits while holding the RwLock.
+        runtime::Runtime,
         select,
         sync::{Mutex, MutexGuard},
         task::JoinHandle,
@@ -212,6 +213,12 @@ async fn run_server(
     wait_for_chunk_timeout: Duration,
     coalesce: Duration,
 ) {
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
     const WAIT_FOR_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
     debug!("spawn quic server");
     let mut last_datapoint = Instant::now();
@@ -224,7 +231,7 @@ async fn run_server(
     let staked_connection_table: Arc<Mutex<ConnectionTable>> =
         Arc::new(Mutex::new(ConnectionTable::new()));
     let (sender, receiver) = async_unbounded();
-    tokio::spawn(packet_batch_sender(
+    runtime.spawn(packet_batch_sender(
         packet_sender,
         receiver,
         exit.clone(),
@@ -271,6 +278,7 @@ async fn run_server(
         if let Ok(Some(connection)) = timeout_connection {
             info!("Got a connection {:?}", connection.remote_address());
             tokio::spawn(setup_connection(
+                Arc::clone(&runtime),
                 connection,
                 unstaked_connection_table.clone(),
                 staked_connection_table.clone(),
@@ -400,6 +408,7 @@ impl NewConnectionHandlerParams {
 }
 
 fn handle_and_cache_new_connection(
+    runtime: Arc<Runtime>,
     connection: Connection,
     mut connection_table_l: MutexGuard<ConnectionTable>,
     connection_table: Arc<Mutex<ConnectionTable>>,
@@ -442,7 +451,12 @@ fn handle_and_cache_new_connection(
             )
         {
             drop(connection_table_l);
-            tokio::spawn(handle_connection(
+            let handle = if let ConnectionPeerType::Staked(_) = params.peer_type {
+                runtime.handle().clone()
+            } else {
+                tokio::runtime::Handle::current()
+            };
+            handle.spawn(handle_connection(
                 connection,
                 remote_addr,
                 last_update,
@@ -475,6 +489,7 @@ fn handle_and_cache_new_connection(
 }
 
 async fn prune_unstaked_connections_and_add_new_connection(
+    runtime: Arc<Runtime>,
     connection: Connection,
     connection_table: Arc<Mutex<ConnectionTable>>,
     max_connections: usize,
@@ -488,6 +503,7 @@ async fn prune_unstaked_connections_and_add_new_connection(
         let mut connection_table = connection_table.lock().await;
         prune_unstaked_connection_table(&mut connection_table, max_connections, stats);
         handle_and_cache_new_connection(
+            runtime,
             connection,
             connection_table,
             connection_table_clone,
@@ -549,6 +565,7 @@ fn compute_recieve_window(
 
 #[allow(clippy::too_many_arguments)]
 async fn setup_connection(
+    runtime: Arc<Runtime>,
     connecting: Connecting,
     unstaked_connection_table: Arc<Mutex<ConnectionTable>>,
     staked_connection_table: Arc<Mutex<ConnectionTable>>,
@@ -605,6 +622,7 @@ async fn setup_connection(
 
                         if connection_table_l.total_size < max_staked_connections {
                             if let Ok(()) = handle_and_cache_new_connection(
+                                runtime,
                                 new_connection,
                                 connection_table_l,
                                 staked_connection_table.clone(),
@@ -621,6 +639,7 @@ async fn setup_connection(
                             // put this connection in the unstaked connection table. If needed, prune a
                             // connection from the unstaked connection table.
                             if let Ok(()) = prune_unstaked_connections_and_add_new_connection(
+                                runtime,
                                 new_connection,
                                 unstaked_connection_table.clone(),
                                 max_unstaked_connections,
@@ -645,6 +664,7 @@ async fn setup_connection(
                     }
                     ConnectionPeerType::Unstaked => {
                         if let Ok(()) = prune_unstaked_connections_and_add_new_connection(
+                            runtime,
                             new_connection,
                             unstaked_connection_table.clone(),
                             max_unstaked_connections,
