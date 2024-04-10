@@ -17,6 +17,7 @@ use {
     quinn::{Accept, Connecting, Connection, Endpoint, EndpointConfig, TokioRuntime, VarInt},
     quinn_proto::VarIntBoundsExceeded,
     rand::{thread_rng, Rng},
+    smallvec::SmallVec,
     solana_measure::measure::Measure,
     solana_perf::packet::{PacketBatch, PACKETS_PER_BATCH},
     solana_sdk::{
@@ -103,7 +104,7 @@ struct PacketChunk {
 // the Packet and then when copying the Packet into a PacketBatch)
 struct PacketAccumulator {
     pub meta: Meta,
-    pub chunks: Vec<PacketChunk>,
+    pub chunks: SmallVec<[PacketChunk; 2]>,
     pub start_time: Instant,
 }
 
@@ -1134,7 +1135,7 @@ async fn handle_chunk(
                     meta.set_socket_addr(remote_addr);
                     *packet_accum = Some(PacketAccumulator {
                         meta,
-                        chunks: Vec::new(),
+                        chunks: SmallVec::new(),
                         start_time: Instant::now(),
                     });
                 }
@@ -1795,7 +1796,7 @@ pub mod test {
             meta.size = size;
             let packet_accum = PacketAccumulator {
                 meta,
-                chunks: vec![PacketChunk {
+                chunks: smallvec::smallvec![PacketChunk {
                     bytes,
                     offset,
                     end_of_chunk: size,
