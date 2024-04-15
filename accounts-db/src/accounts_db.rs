@@ -1444,7 +1444,7 @@ pub struct AccountsDb {
 
     write_cache_limit_bytes: Option<u64>,
 
-    sender_bg_hasher: Option<Sender<CachedAccount>>,
+    sender_bg_hasher: Option<Sender<Vec<CachedAccount>>>,
     read_only_accounts_cache: ReadOnlyAccountsCache,
 
     recycle_stores: RwLock<RecycleStores>,
@@ -2896,20 +2896,17 @@ impl AccountsDb {
         }
     }
 
-    fn background_hasher(receiver: Receiver<CachedAccount>) {
+    fn background_hasher(receiver: Receiver<Vec<CachedAccount>>) {
         loop {
-            let result = receiver.recv();
-            match result {
-                Ok(account) => {
-                    // if we hold the only ref, then this account doesn't need to be hashed, we ignore this account and it will disappear
-                    if Arc::strong_count(&account) > 1 {
-                        // this will cause the hash to be calculated and store inside account if it needs to be calculated
-                        let _ = (*account).hash();
-                    };
-                }
-                Err(_) => {
-                    break;
-                }
+            let Ok(accounts) = receiver.recv() else {
+                break;
+            };
+            for account in accounts {
+                // if we hold the only ref, then this account doesn't need to be hashed, we ignore this account and it will disappear
+                if Arc::strong_count(&account) > 1 {
+                    // this will cause the hash to be calculated and store inside account if it needs to be calculated
+                    let _ = (*account).hash();
+                };
             }
         }
     }
@@ -6750,7 +6747,7 @@ impl AccountsDb {
     where
         P: Iterator<Item = u64>,
     {
-        txn_iter
+        let (account_infos, cached_accounts) = txn_iter
             .enumerate()
             .map(|(i, txn)| {
                 let account = accounts_and_meta_to_store
@@ -6774,16 +6771,19 @@ impl AccountsDb {
                     None::<&Hash>,
                     include_slot_in_hash,
                 );
-                // hash this account in the bg
-                match &self.sender_bg_hasher {
-                    Some(ref sender) => {
-                        let _ = sender.send(cached_account);
-                    }
-                    None => (),
-                };
-                account_info
+                (account_info, cached_account)
             })
-            .collect()
+            .unzip();
+
+        // hash this accounts in bg
+        match &self.sender_bg_hasher {
+            Some(ref sender) => {
+                let _ = sender.send(cached_accounts);
+            }
+            None => (),
+        };
+
+        account_infos
     }
 
     fn store_accounts_to<
