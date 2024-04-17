@@ -84,6 +84,8 @@ const STREAM_THROTTLE_SLEEP_INTERVAL: Duration = Duration::from_millis(100);
 
 const CONNECTIONS_LIMIT_PER_SECOND: u32 = 4;
 
+const PRUNE_RANDOM_SAMPLE_SIZE: usize = 2;
+
 // A sequence of bytes that is part of a packet
 // along with where in the packet it is
 struct PacketChunk {
@@ -293,11 +295,7 @@ fn prune_unstaked_connection_table(
     stats: Arc<StreamStats>,
 ) {
     if unstaked_connection_table.total_size >= max_unstaked_connections {
-        const PRUNE_TABLE_TO_PERCENTAGE: u8 = 90;
-        let max_percentage_full = Percentage::from(PRUNE_TABLE_TO_PERCENTAGE);
-
-        let max_connections = max_percentage_full.apply_to(max_unstaked_connections);
-        let num_pruned = unstaked_connection_table.prune_oldest(max_connections);
+        let num_pruned = unstaked_connection_table.prune_random(PRUNE_RANDOM_SAMPLE_SIZE, u64::MAX);
         stats.num_evictions.fetch_add(num_pruned, Ordering::Relaxed);
     }
 }
@@ -569,7 +567,6 @@ async fn setup_connection(
     stats: Arc<StreamStats>,
     wait_for_chunk_timeout: Duration,
 ) {
-    const PRUNE_RANDOM_SAMPLE_SIZE: usize = 2;
     let from = connecting.remote_address();
     if let Ok(connecting_result) = timeout(QUIC_CONNECTION_HANDSHAKE_TIMEOUT, connecting).await {
         match connecting_result {
@@ -1271,21 +1268,27 @@ impl ConnectionTable {
     // If the stakes of all the sampled connections are higher than the
     // threshold_stake, rejects the pruning attempt, and returns 0.
     fn prune_random(&mut self, sample_size: usize, threshold_stake: u64) -> usize {
+        let now = timing::timestamp();
+        const NEW_CONNECTION_GRACE_TIME: u64 = 100;
+        let is_new =
+            move |established_ts| now.saturating_sub(established_ts) <= NEW_CONNECTION_GRACE_TIME;
+
         let num_pruned = std::iter::once(self.table.len())
             .filter(|&size| size > 0)
             .flat_map(|size| {
                 let mut rng = thread_rng();
                 repeat_with(move || rng.gen_range(0..size))
             })
-            .map(|index| {
+            .filter_map(|index| {
                 let connection = self.table[index].first();
-                let stake = connection.map(|connection| connection.stake);
-                (index, stake)
+                connection.map(|connection| (index, connection.stake, connection.last_update()))
             })
             .take(sample_size)
-            .min_by_key(|&(_, stake)| stake)
-            .filter(|&(_, stake)| stake < Some(threshold_stake))
-            .and_then(|(index, _)| self.table.swap_remove_index(index))
+            .min_by_key(|&(_, stake, _)| stake)
+            .filter(|&(_, stake, established_ts)| {
+                stake < threshold_stake && !is_new(established_ts)
+            })
+            .and_then(|(index, _, _)| self.table.swap_remove_index(index))
             .map(|(_, connections)| connections.len())
             .unwrap_or_default();
         self.total_size = self.total_size.saturating_sub(num_pruned);
