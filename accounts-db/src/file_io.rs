@@ -38,18 +38,22 @@ pub fn read_more_buffer(
 pub fn read_into_buffer(
     file: &File,
     start_offset: usize,
-    buffer: &mut [u8],
+    mut buffer: &mut [u8],
     valid_file_len: usize,
 ) -> std::io::Result<usize> {
-    let mut offset = start_offset;
-    let mut buffer_offset = 0;
-    let mut total_bytes_read = 0;
     if start_offset >= valid_file_len {
         return Ok(0);
     }
 
-    while buffer_offset < buffer.len() {
-        match file.read_at(&mut buffer[buffer_offset..], offset as u64) {
+    // FIXME: make this an argument instead of start_offset and valid_file_len
+    let file_offsets = start_offset..valid_file_len;
+    let mut total_bytes_read = 0;
+
+    let buffer_len = buffer.len();
+    buffer = &mut buffer[..file_offsets.len().min(buffer_len)];
+
+    while !buffer.is_empty() {
+        match file.read_at(buffer, file_offsets.start as u64 + total_bytes_read as u64) {
             Err(err) => {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
@@ -57,15 +61,10 @@ pub fn read_into_buffer(
                 return Err(err);
             }
             Ok(bytes_read_this_time) => {
+                // There is possibly more to read. `read_at` may have returned
+                // partial results, so prepare to loop and read again.
                 total_bytes_read += bytes_read_this_time;
-                if total_bytes_read + start_offset >= valid_file_len {
-                    total_bytes_read -= (total_bytes_read + start_offset) - valid_file_len;
-                    // we've read all there is in the file
-                    break;
-                }
-                // There is possibly more to read. `read_at` may have returned partial results, so prepare to loop and read again.
-                buffer_offset += bytes_read_this_time;
-                offset += bytes_read_this_time;
+                buffer = &mut buffer[bytes_read_this_time..];
             }
         }
     }
@@ -113,10 +112,8 @@ mod tests {
         let num_bytes_read = read_into_buffer(&sample_file, 0, &mut buffer, 16).unwrap();
         assert_eq!(num_bytes_read, 16);
         assert_eq!(bytes[0..16], buffer[0..16]);
-        // As a side effect of the `read_into_buffer` the data passed `valid_file_len` was
-        // read and put into the buffer, though these data should not be
-        // consumed.
-        assert_eq!(buffer[16..32], bytes[16..32]);
+        // We don't read past valid_file_len
+        assert_eq!(buffer[16..32], [0; 16]);
 
         // Given the start offset 8, it should only read 24 bytes into buffer
         let mut buffer = [0; 32];
