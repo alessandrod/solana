@@ -16,8 +16,9 @@ impl<'a, 'b> TransactionBatch<'a, 'b> {
     pub fn new(
         lock_results: Vec<Result<()>>,
         bank: &'a Bank,
-        sanitized_txs: Cow<'b, [SanitizedTransaction]>,
+        sanitized_txs: impl Into<Cow<'b, [SanitizedTransaction]>>,
     ) -> Self {
+        let sanitized_txs = sanitized_txs.into();
         assert_eq!(lock_results.len(), sanitized_txs.len());
         Self {
             lock_results,
