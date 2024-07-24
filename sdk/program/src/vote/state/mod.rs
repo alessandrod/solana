@@ -485,8 +485,9 @@ impl VoteState {
     /// compatibility with `bincode::deserialize`
     pub fn deserialize_into(
         input: &[u8],
-        vote_state: &mut VoteState,
+        vote_state: impl Into<*mut VoteState>,
     ) -> Result<(), InstructionError> {
+        let vote_state = vote_state.into();
         let mut cursor = Cursor::new(input);
 
         let variant = read_u32(&mut cursor)?;
@@ -496,10 +497,11 @@ impl VoteState {
             0 => {
                 #[cfg(not(target_os = "solana"))]
                 {
-                    *vote_state = bincode::deserialize::<VoteStateVersions>(input)
-                        .map(|versioned| versioned.convert_to_current())
-                        .map_err(|_| InstructionError::InvalidAccountData)?;
-
+                    unsafe {
+                        *vote_state = bincode::deserialize::<VoteStateVersions>(input)
+                            .map(|versioned| versioned.convert_to_current())
+                            .map_err(|_| InstructionError::InvalidAccountData)?;
+                    }
                     Ok(())
                 }
                 #[cfg(target_os = "solana")]
