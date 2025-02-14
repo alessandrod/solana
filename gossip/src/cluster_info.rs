@@ -2786,7 +2786,7 @@ impl Node {
         .unwrap();
 
         let (_, retransmit_sockets) =
-            multi_bind_in_range_with_config(bind_ip_addr, port_range, socket_config_reuseport, 8)
+            multi_bind_in_range_with_config(bind_ip_addr, port_range, socket_config_reuseport, 16)
                 .expect("retransmit multi_bind");
 
         let (_, repair) = Self::bind_with_config(bind_ip_addr, port_range, socket_config);
