@@ -5,8 +5,11 @@ use {
         addr_cache::AddrCache,
         cluster_nodes::{self, ClusterNodes, ClusterNodesCache, Error, MAX_NUM_TURBINE_HOPS},
     },
+    agave_io_uring::{io_uring_supported, Ring, RingCtx, RingOp},
     bytes::Bytes,
-    crossbeam_channel::{Receiver, RecvError, TryRecvError},
+    crossbeam_channel::{Receiver, RecvError, Sender, TryRecvError},
+    io_uring::{cqueue, opcode, squeue, types::Fd, IoUring},
+    libc::{iovec, msghdr, sockaddr_in, sockaddr_in6, AF_INET, AF_INET6},
     lru::LruCache,
     rand::Rng,
     rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
@@ -36,8 +39,12 @@ use {
     std::{
         borrow::Cow,
         collections::{HashMap, HashSet},
+        io,
+        mem::{self, MaybeUninit},
         net::{SocketAddr, UdpSocket},
         ops::AddAssign,
+        os::fd::{AsFd as _, AsRawFd as _, BorrowedFd},
+        ptr,
         sync::{
             atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
@@ -217,6 +224,7 @@ fn retransmit(
     retransmit_receiver: &Receiver<Vec<shred::Payload>>,
     retransmit_sockets: &[UdpSocket],
     quic_endpoint_sender: &AsyncSender<(SocketAddr, Bytes)>,
+    udp_sender: &Option<Sender<(Vec<SocketAddr>, (usize, shred::Payload))>>,
     stats: &mut RetransmitStats,
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     addr_cache: &mut AddrCache,
@@ -308,6 +316,7 @@ fn retransmit(
             socket_addr_space,
             socket,
             quic_endpoint_sender,
+            udp_sender,
             stats,
         )
     };
@@ -357,6 +366,7 @@ fn retransmit_shred(
     socket_addr_space: &SocketAddrSpace,
     socket: &UdpSocket,
     quic_endpoint_sender: &AsyncSender<(SocketAddr, Bytes)>,
+    udp_sender: &Option<Sender<(Vec<SocketAddr>, (usize, shred::Payload))>>,
     stats: &RetransmitStats,
 ) -> Option<RetransmitShredOutput> {
     let key = shred::layout::get_shred_id(shred.as_ref())?;
@@ -386,16 +396,26 @@ fn retransmit_shred(
                 .filter_map(|&addr| quic_endpoint_sender.try_send((addr, shred.clone())).ok())
                 .count()
         }
-        Protocol::UDP => match multi_target_send(socket, shred, &addrs) {
-            Ok(()) => addrs.len(),
-            Err(SendPktsError::IoError(ioerr, num_failed)) => {
-                error!(
+        Protocol::UDP => {
+            if let Some(udp_sender) = udp_sender {
+                let count = addrs.len();
+                udp_sender
+                    .send((addrs.iter().cloned().collect(), (42, shred)))
+                    .unwrap();
+                count
+            } else {
+                match multi_target_send(socket, shred, &addrs) {
+                    Ok(()) => addrs.len(),
+                    Err(SendPktsError::IoError(ioerr, num_failed)) => {
+                        error!(
                     "retransmit_to multi_target_send error: {ioerr:?}, {num_failed}/{} packets failed",
                     addrs.len(),
                 );
-                addrs.len() - num_failed
+                        addrs.len() - num_failed
+                    }
+                }
             }
-        },
+        }
     };
     retransmit_time.stop();
     stats
@@ -510,6 +530,7 @@ fn cache_retransmit_addrs(
 /// Service to retransmit messages received from other peers in turbine.
 pub struct RetransmitStage {
     retransmit_thread_handle: JoinHandle<()>,
+    retransmit_io_thread_handle: Option<JoinHandle<()>>,
 }
 
 impl RetransmitStage {
@@ -553,38 +574,105 @@ impl RetransmitStage {
                 .unwrap()
         };
 
+        let (udp_sender, udp_receiver) = if io_uring_supported() {
+            let (a, b) = crossbeam_channel::unbounded();
+            (Some(a), Some(b))
+        } else {
+            (None, None)
+        };
+
         let retransmit_thread_handle = Builder::new()
             .name("solRetransmittr".to_string())
-            .spawn(move || {
-                while retransmit(
-                    &thread_pool,
-                    &bank_forks,
-                    &leader_schedule_cache,
-                    &cluster_info,
-                    &retransmit_receiver,
-                    &retransmit_sockets,
-                    &quic_endpoint_sender,
-                    &mut stats,
-                    &cluster_nodes_cache,
-                    &mut addr_cache,
-                    &mut shred_deduper,
-                    &max_slots,
-                    rpc_subscriptions.as_deref(),
-                    slot_status_notifier.as_ref(),
-                )
-                .is_ok()
-                {}
+            .spawn({
+                let retransmit_sockets = retransmit_sockets.clone();
+                move || {
+                    while retransmit(
+                        &thread_pool,
+                        &bank_forks,
+                        &leader_schedule_cache,
+                        &cluster_info,
+                        &retransmit_receiver,
+                        &retransmit_sockets,
+                        &quic_endpoint_sender,
+                        &udp_sender,
+                        &mut stats,
+                        &cluster_nodes_cache,
+                        &mut addr_cache,
+                        &mut shred_deduper,
+                        &max_slots,
+                        rpc_subscriptions.as_deref(),
+                        slot_status_notifier.as_ref(),
+                    )
+                    .is_ok()
+                    {}
+                }
             })
             .unwrap();
 
+        let retransmit_io_thread_handle = if let Some(udp_receiver) = udp_receiver {
+            Some(
+                Builder::new()
+                    .name("solRetransmitIO".to_string())
+                    .spawn(move || {
+                        let ring = IoUring::builder().setup_sqpoll(10).build(64).unwrap();
+                        ring.submitter()
+                            .register_iowq_max_workers(&mut [4, 4])
+                            .unwrap();
+                        let ring = Ring::<RingState, Op>::new(ring, RingState::new());
+                        rtx_loop(ring, udp_receiver, &retransmit_sockets)
+                    })
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+
         Self {
             retransmit_thread_handle,
+            retransmit_io_thread_handle,
         }
     }
 
     pub fn join(self) -> thread::Result<()> {
+        if let Some(handle) = self.retransmit_io_thread_handle {
+            handle.join()?;
+        }
         self.retransmit_thread_handle.join()
     }
+}
+
+fn rtx_loop<'a>(
+    mut ring: Ring<RingState, Op<'a>>,
+    receiver: Receiver<(Vec<SocketAddr>, (usize, shred::Payload))>,
+    sockets: &'a Arc<Vec<UdpSocket>>,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok((addrs, (buf_index, payload))) => {
+                for (addr, socket) in addrs.into_iter().zip(sockets.iter().cycle()) {
+                    unsafe {
+                        ring.push(Op::SendMsg(SendMsgOp::new(
+                            socket,
+                            addr,
+                            buf_index,
+                            payload.clone(),
+                        )))
+                        .unwrap()
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                ring.submit().unwrap();
+                let e = ring.process_completions();
+                if let Err(e) = e {
+                    eprintln!("ERROR: {e}");
+                }
+                thread::sleep(Duration::from_nanos(500));
+            }
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    ring.drain().unwrap();
 }
 
 impl AddAssign for RetransmitSlotStats {
@@ -770,6 +858,145 @@ fn notify_subscribers(
     }
 }
 
+struct RingState {}
+
+impl RingState {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+enum Op<'a> {
+    SendMsg(SendMsgOp<'a>),
+}
+
+unsafe impl<'a> Send for Op<'a> {}
+unsafe impl<'a> Send for SendMsgOp<'a> {}
+
+impl RingOp<RingState> for Op<'_> {
+    fn entry(&mut self) -> io_uring::squeue::Entry {
+        match self {
+            Op::SendMsg(op) => op.entry(),
+        }
+    }
+
+    fn complete(
+        &mut self,
+        entry: &cqueue::Entry,
+        res: io::Result<i32>,
+        state: &mut RingCtx<RingState, Self>,
+    ) -> io::Result<()> {
+        match self {
+            Op::SendMsg(op) => op.complete(entry, res, state),
+        }
+    }
+}
+
+#[repr(C)]
+union SockAddr {
+    v4: sockaddr_in,
+    v6: sockaddr_in6,
+}
+
+struct SendMsgOp<'a> {
+    socket: BorrowedFd<'a>,
+    addr: SockAddr,
+    addr_len: u32,
+    iov: iovec,
+    msg: msghdr,
+    buf_index: usize,
+    payload: shred::Payload,
+}
+
+impl<'a> SendMsgOp<'a> {
+    fn new(
+        socket: &'a UdpSocket,
+        addr: SocketAddr,
+        buf_index: usize,
+        payload: shred::Payload,
+    ) -> Self {
+        let (addr, addr_len) = socketaddr_to_sockaddr(addr);
+        Self {
+            socket: socket.as_fd(),
+            addr,
+            addr_len,
+            iov: unsafe { MaybeUninit::zeroed().assume_init() },
+            msg: unsafe { MaybeUninit::zeroed().assume_init() },
+            buf_index,
+            payload,
+        }
+    }
+
+    fn entry(&mut self) -> squeue::Entry {
+        self.iov = iovec {
+            iov_base: self.payload.as_ptr() as *mut _,
+            iov_len: self.payload.len(),
+        };
+        self.msg = msghdr {
+            msg_name: &mut self.addr as *mut _ as *mut _,
+            msg_namelen: self.addr_len,
+            msg_iov: &mut self.iov as *mut _ as *mut _,
+            msg_iovlen: 1,
+            msg_control: ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        opcode::SendMsg::new(Fd(self.socket.as_raw_fd()), &self.msg as *const _)
+            .build()
+            .flags(squeue::Flags::ASYNC)
+    }
+
+    fn complete(
+        &mut self,
+        entry: &cqueue::Entry,
+        res: io::Result<i32>,
+        state: &mut RingCtx<RingState, Op>,
+    ) -> io::Result<()> {
+        if res.is_err() {
+            eprintln!("LMAO {res:?}");
+        }
+        res.map(|_| ())
+    }
+}
+
+fn socketaddr_to_sockaddr(addr: SocketAddr) -> (SockAddr, u32) {
+    match addr {
+        SocketAddr::V4(addr) => {
+            let len = mem::size_of::<sockaddr_in>() as u32;
+            (
+                SockAddr {
+                    v4: sockaddr_in {
+                        sin_family: AF_INET as u16,
+                        sin_port: addr.port().to_be(),
+                        sin_addr: libc::in_addr {
+                            s_addr: u32::from_ne_bytes(addr.ip().octets()),
+                        },
+                        sin_zero: [0; 8],
+                    },
+                },
+                len,
+            )
+        }
+        SocketAddr::V6(addr) => {
+            let len = mem::size_of::<sockaddr_in6>() as u32;
+            (
+                SockAddr {
+                    v6: sockaddr_in6 {
+                        sin6_family: AF_INET6 as u16,
+                        sin6_port: addr.port().to_be(),
+                        sin6_flowinfo: addr.flowinfo(),
+                        sin6_addr: libc::in6_addr {
+                            s6_addr: addr.ip().octets(),
+                        },
+                        sin6_scope_id: addr.scope_id(),
+                    },
+                },
+                len,
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -862,4 +1089,168 @@ mod tests {
         assert!(shred_deduper.dedup(shred.id(), shred.payload(), MAX_DUPLICATE_COUNT));
         assert!(shred_deduper.dedup(shred.id(), shred.payload(), MAX_DUPLICATE_COUNT));
     }
+
+    #[test]
+    fn test_ring_loop_empty_receiver() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let sockets = Arc::new(vec![UdpSocket::bind("127.0.0.1:0").unwrap()]);
+        let ring = IoUring::builder().setup_sqpoll(10).build(64).unwrap();
+        ring.submitter()
+            .register_iowq_max_workers(&mut [4, 4])
+            .unwrap();
+        let mut ring = Ring::new(ring, RingState::new());
+        let handle = thread::spawn(move || rtx_loop(ring, receiver, &sockets));
+        thread::sleep(Duration::from_millis(100));
+        drop(sender);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_ring_loop_with_data() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let send_sockets = Arc::new(vec![
+            UdpSocket::bind("127.0.0.1:0").unwrap(),
+            UdpSocket::bind("127.0.0.1:0").unwrap(),
+        ]);
+        let recv_sockets = vec![
+            UdpSocket::bind("127.0.0.1:1234").unwrap(),
+            UdpSocket::bind("127.0.0.1:1235").unwrap(),
+            UdpSocket::bind("127.0.0.1:1236").unwrap(),
+        ];
+        let addrs: Vec<_> = recv_sockets
+            .iter()
+            .map(|s| s.local_addr().unwrap())
+            .collect();
+        let payload = shred::Payload::Shared(Arc::new(vec![1, 2, 3, 4]));
+        sender.send((addrs.clone(), (42, payload.clone()))).unwrap();
+        let ring = IoUring::builder().setup_sqpoll(1000).build(1024).unwrap();
+        ring.submitter()
+            .register_iowq_max_workers(&mut [4, 4])
+            .unwrap();
+        let mut ring = Ring::new(ring, RingState::new());
+        let handle = thread::spawn(move || rtx_loop(ring, receiver, &send_sockets));
+
+        for socket in recv_sockets {
+            let mut buf = [0; 4];
+            let (len, _) = socket.recv_from(&mut buf).unwrap();
+            assert_eq!(len, payload.len());
+            assert_eq!(&buf, &payload[..]);
+        }
+
+        drop(sender);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_ring_send_a_lot() {
+        // Get number of rings/threads from environment variable
+        let num_rings = std::env::var("NUM_RINGS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
+
+        let send_sockets = Arc::new(vec![
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+            UdpSocket::bind("147.28.156.23:0").unwrap(),
+        ]);
+
+        let ip = std::env::var("IP").unwrap_or("86.109.14.143:8101".to_string());
+        let recv_addrs = vec![ip.parse().unwrap()];
+
+        let num_threads = std::env::var("NUM_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let sq_entries = std::env::var("SQ_ENTRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+        let cq_entries = std::env::var("CQ_ENTRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+
+        // Create collections to store our dynamic resources
+        let mut channels = Vec::with_capacity(num_rings);
+        let mut io_threads = Vec::with_capacity(num_rings);
+        let mut sender_threads = Vec::with_capacity(num_rings);
+
+        // Create channel pairs
+        for _ in 0..num_rings {
+            let (sender, receiver) = crossbeam_channel::bounded(100_000);
+            channels.push((sender, receiver));
+        }
+
+        let mut fd = 0;
+        // Create and spawn RTX threads
+        for i in 0..num_rings {
+            // Clone the sockets for this thread
+            let sockets_clone = send_sockets.clone();
+
+            // Get receiver for this thread
+            let receiver = channels[i].1.clone();
+
+            let mut builder = IoUring::builder();
+            // Create a ring attached to the base ring's work queue
+            builder.setup_cqsize(cq_entries);
+            if fd != 0 {
+                builder.setup_attach_wq(fd);
+            }
+
+            let ring = builder.build(sq_entries).unwrap();
+            if fd == 0 {
+                fd = ring.as_raw_fd();
+            }
+
+            if num_threads != 0 {
+                ring.submitter()
+                    .register_iowq_max_workers(&mut [num_threads, num_threads])
+                    .unwrap();
+            }
+
+            let ring = Ring::new(ring, RingState::new());
+
+            // Spawn rtx_loop thread
+            let handle = thread::spawn(move || rtx_loop(ring, receiver, &sockets_clone));
+
+            io_threads.push(handle);
+        }
+
+        // Create sender threads
+        let data_size = std::env::var("DATA_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1400);
+
+        for i in 0..num_rings {
+            let sender = channels[i].0.clone();
+            let addrs = recv_addrs.clone();
+            let data = Arc::new(vec![42; data_size]);
+
+            let handle = thread::spawn(move || loop {
+                sender.send((
+                    addrs.clone(),
+                    (42, shred::Payload::Shared(Arc::clone(&data))),
+                ));
+            });
+
+            sender_threads.push(handle);
+        }
+
+        // Wait for all IO threads to complete
+        for handle in io_threads {
+            handle.join().unwrap();
+        }
+    }
 }
+
+use jemallocator::Jemalloc;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;

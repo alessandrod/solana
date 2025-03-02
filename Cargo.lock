@@ -187,6 +187,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-io-uring"
+version = "2.3.0"
+dependencies = [
+ "io-uring",
+ "libc",
+ "log",
+ "slab",
+]
+
+[[package]]
 name = "agave-ledger-tool"
 version = "2.3.0"
 dependencies = [
@@ -3532,6 +3542,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5bbe824c507c5da5956355e86a746d82e0e1464f65d862cc5e71da70e94b2c"
 dependencies = [
  "cfg-if 1.0.0",
+]
+
+[[package]]
+name = "io-uring"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab01638bb6a279897b7691f87f3f3c232451711fd419a69ced980ce61074fa46"
+dependencies = [
+ "bitflags 2.9.0",
+ "cfg-if 1.0.0",
+ "libc",
 ]
 
 [[package]]
@@ -10736,14 +10757,17 @@ dependencies = [
 name = "solana-turbine"
 version = "2.3.0"
 dependencies = [
+ "agave-io-uring",
  "assert_matches",
  "bincode",
  "bs58",
  "bytes",
  "crossbeam-channel",
  "futures 0.3.31",
+ "io-uring",
  "itertools 0.12.1",
  "lazy-lru",
+ "libc",
  "log",
  "lru",
  "quinn",
@@ -10773,6 +10797,7 @@ dependencies = [
  "static_assertions",
  "test-case",
  "thiserror 2.0.12",
+ "tikv-jemallocator",
  "tokio",
 ]
 

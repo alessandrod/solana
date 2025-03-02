@@ -5,8 +5,8 @@ split-debuginfo = "packed"
 lto = false                # Preserve the 'thin local LTO' for this build.
 
 [profile.release]
-split-debuginfo = "unpacked"
 lto = "thin"
+debug = 2
 
 [workspace]
 members = [
@@ -56,6 +56,7 @@ members = [
     "gossip",
     "inline-spl",
     "install",
+    "io-uring",
     "keygen",
     "lattice-hash",
     "ledger",
@@ -173,6 +174,7 @@ check-cfg = [
 Inflector = "0.11.4"
 axum = "0.7.9"
 agave-banking-stage-ingress-types = { path = "banking-stage-ingress-types", version = "=2.3.0" }
+agave-io-uring = { path = "io-uring", version = "=2.3.0" }
 agave-transaction-view = { path = "transaction-view", version = "=2.3.0" }
 aquamarine = "0.6.0"
 aes-gcm-siv = "0.11.1"
@@ -264,6 +266,7 @@ hyper-proxy = "0.9.1"
 im = "15.1.0"
 indexmap = "2.8.0"
 indicatif = "0.17.11"
+io-uring = "0.7.4"
 itertools = "0.12.1"
 jemallocator = { package = "tikv-jemallocator", version = "0.6.0", features = [
     "unprefixed_malloc_on_supported_platforms",
