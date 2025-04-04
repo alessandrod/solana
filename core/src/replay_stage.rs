@@ -2377,6 +2377,8 @@ impl ReplayStage {
 
         blockstore.slots_stats.mark_dead(slot);
 
+        slot_dead(slot);
+
         let err = format!("error: {err:?}");
 
         if let Some(slot_status_notifier) = slot_status_notifier {
@@ -3104,6 +3106,7 @@ impl ReplayStage {
             };
 
             let bank_progress = progress.entry(bank.slot()).or_insert_with(|| {
+                slot_start(bank.slot());
                 ForkProgress::new_from_bank(
                     &bank,
                     my_pubkey,
@@ -3323,6 +3326,12 @@ impl ReplayStage {
                     r_replay_stats.batch_execute.totals
                 );
                 did_complete_bank = true;
+                slot_complete(
+                    bank_slot,
+                    r_replay_progress.num_shreds,
+                    r_replay_progress.num_entries,
+                    r_replay_progress.num_txs,
+                );
                 let _ = cluster_slots_update_sender.send(vec![bank_slot]);
 
                 if let Some(transaction_status_sender) = transaction_status_sender {
@@ -10002,4 +10011,22 @@ pub(crate) mod tests {
         );
         assert!(is_alpenglow_migration_complete);
     }
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn slot_start(slot: Slot) {
+    log::trace!("slot start {slot}");
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn slot_complete(slot: Slot, num_shreds: u64, num_entries: usize, num_txs: usize) {
+    log::trace!("slot complete {slot} {num_shreds} {num_entries} {num_txs}");
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn slot_dead(slot: Slot) {
+    log::trace!("slot dead {slot}");
 }
