@@ -1,3 +1,4 @@
+use agave_perf_trace::{timestamp, trace_transaction};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -289,6 +290,15 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
 
     let (transaction, max_age) = transaction_state.take_transaction_for_scheduling();
     let cost = transaction_state.cost();
+
+    trace_transaction(
+        transaction
+            .as_sanitized_transaction()
+            .signature()
+            .as_array(),
+        timestamp(),
+        agave_perf_trace::TransactionState::Scheduled,
+    );
 
     Ok(TransactionSchedulingInfo {
         thread_id,

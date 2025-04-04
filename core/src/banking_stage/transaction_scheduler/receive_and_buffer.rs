@@ -1,5 +1,8 @@
+use agave_perf_trace::{timestamp, trace_transaction};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use solana_perf::get_signature_from_packet;
+use solana_signature::SIGNATURE_BYTES;
 use {
     super::{
         transaction_priority_id::TransactionPriorityId,
@@ -326,6 +329,7 @@ impl TransactionViewReceiveAndBuffer {
         let mut num_dropped_on_lock_validation = 0;
         let mut num_dropped_on_compute_budget = 0;
 
+        let ts = timestamp();
         for packet_batch in packet_batch_message.iter() {
             for packet in packet_batch.iter() {
                 let Some(packet_data) = packet.data(..) else {
@@ -336,6 +340,10 @@ impl TransactionViewReceiveAndBuffer {
                 if !should_parse {
                     num_dropped_without_parsing += 1;
                     continue;
+                }
+
+                if let Ok(sig) = get_signature_from_packet(&packet) {
+                    trace_transaction(sig, ts, agave_perf_trace::TransactionState::Buffered);
                 }
 
                 // Reserve free-space to copy packet into, run sanitization checks, and insert.

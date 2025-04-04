@@ -7,6 +7,7 @@ use {
         quic::{configure_server, QuicServerError, QuicStreamerConfig, StreamerStats},
         streamer::StakedNodes,
     },
+    agave_perf_trace::{timestamp, trace_transaction, TransactionState},
     bytes::{BufMut, Bytes, BytesMut},
     crossbeam_channel::{Sender, TrySendError},
     futures::{stream::FuturesUnordered, Future, StreamExt as _},
@@ -22,7 +23,9 @@ use {
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_tls_utils::get_pubkey_from_tls_certificate,
-    solana_transaction_metrics_tracker::signature_if_should_track_packet,
+    solana_transaction_metrics_tracker::{
+        get_signature_from_packet, signature_if_should_track_packet,
+    },
     std::{
         array, fmt,
         iter::repeat_with,
@@ -100,6 +103,7 @@ struct PacketAccumulator {
     pub meta: Meta,
     pub chunks: SmallVec<[Bytes; 2]>,
     pub start_time: Instant,
+    pub ts: u64,
 }
 
 impl PacketAccumulator {
@@ -108,6 +112,7 @@ impl PacketAccumulator {
             meta,
             chunks: SmallVec::default(),
             start_time: Instant::now(),
+            ts: timestamp(),
         }
     }
 }
@@ -745,6 +750,11 @@ fn handle_chunks(
     peer_type: ConnectionPeerType,
 ) -> Result<StreamState, ()> {
     let n_chunks = chunks.len();
+    if accum.chunks.is_empty() && n_chunks > 0 {
+        accum.start_time = Instant::now();
+        accum.ts = timestamp();
+    }
+
     for chunk in chunks {
         accum.meta.size += chunk.len();
         if accum.meta.size > PACKET_DATA_SIZE {
@@ -803,6 +813,10 @@ fn handle_chunks(
         }
         BytesPacket::new(buf.freeze(), accum.meta.clone())
     };
+
+    if let Ok(sig) = get_signature_from_packet(&packet) {
+        trace_transaction(sig, accum.ts, TransactionState::Received);
+    }
 
     let packet_size = packet.meta().size;
 

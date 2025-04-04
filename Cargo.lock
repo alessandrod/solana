@@ -210,6 +210,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-perf-trace"
+version = "4.0.0-alpha.0"
+dependencies = [
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "agave-precompiles"
 version = "4.0.0-alpha.0"
 dependencies = [
@@ -8165,6 +8173,7 @@ dependencies = [
  "agave-banking-stage-ingress-types",
  "agave-feature-set",
  "agave-logger",
+ "agave-perf-trace",
  "agave-reserved-account-keys",
  "agave-scheduler-bindings",
  "agave-scheduling-utils",
@@ -9544,6 +9553,7 @@ name = "solana-perf"
 version = "4.0.0-alpha.0"
 dependencies = [
  "agave-logger",
+ "agave-perf-trace",
  "ahash 0.8.12",
  "assert_matches",
  "bencher",
@@ -10908,6 +10918,7 @@ name = "solana-streamer"
 version = "4.0.0-alpha.0"
 dependencies = [
  "agave-logger",
+ "agave-perf-trace",
  "anyhow",
  "arc-swap",
  "assert_matches",

@@ -8,6 +8,11 @@
     )
 )]
 #![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
+
+use solana_short_vec::decode_shortu16_len;
+use solana_signature::SIGNATURE_BYTES;
+
+use crate::packet::{BytesPacket, PacketRef, PacketRefMut};
 pub mod data_budget;
 pub mod deduper;
 pub mod discard;
@@ -91,4 +96,42 @@ pub fn report_target_features() {
             }
         }
     }
+}
+
+pub fn get_signature_from_packet<'a>(
+    packet: &PacketRef<'a>,
+) -> Result<&'a [u8; SIGNATURE_BYTES], ()> {
+    let (sig_len_untrusted, sig_start) = packet
+        .data(..)
+        .and_then(|bytes| decode_shortu16_len(bytes).ok())
+        .ok_or(())?;
+
+    if sig_len_untrusted < 1 {
+        return Err(());
+    }
+
+    let signature = packet
+        .data(sig_start..sig_start.saturating_add(SIGNATURE_BYTES))
+        .ok_or(())?;
+    let signature = signature.try_into().map_err(|_| ())?;
+    Ok(signature)
+}
+
+pub fn get_signature_from_packet_mut<'a>(
+    packet: &'a PacketRefMut<'a>,
+) -> Result<&'a [u8; SIGNATURE_BYTES], ()> {
+    let (sig_len_untrusted, sig_start) = packet
+        .data(..)
+        .and_then(|bytes| decode_shortu16_len(bytes).ok())
+        .ok_or(())?;
+
+    if sig_len_untrusted < 1 {
+        return Err(());
+    }
+
+    let signature = packet
+        .data(sig_start..sig_start.saturating_add(SIGNATURE_BYTES))
+        .ok_or(())?;
+    let signature = signature.try_into().map_err(|_| ())?;
+    Ok(signature)
 }

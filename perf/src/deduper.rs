@@ -1,9 +1,11 @@
 //! Utility to deduplicate batches of incoming network packets.
 
 use {
-    crate::packet::PacketBatch,
+    crate::{get_signature_from_packet, get_signature_from_packet_mut, packet::PacketBatch},
+    agave_perf_trace::{timestamp, trace_transaction, TransactionState},
     ahash::RandomState,
     rand::Rng,
+    solana_signature::SIGNATURE_BYTES,
     std::{
         hash::Hash,
         iter::repeat_with,
@@ -100,6 +102,9 @@ pub fn dedup_packets_and_count_discards<const K: usize>(
                     .unwrap_or(true)
             {
                 packet.meta_mut().set_discard(true);
+                if let Ok(sig) = get_signature_from_packet_mut(&packet) {
+                    trace_transaction(sig, timestamp(), TransactionState::Deduped);
+                }
             }
             u64::from(packet.meta().discard())
         })

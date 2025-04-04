@@ -1,3 +1,4 @@
+use agave_perf_trace::{timestamp, trace_transaction};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -251,6 +252,14 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
                             continue;
                         }
                     }
+                    trace_transaction(
+                        transaction
+                            .as_sanitized_transaction()
+                            .signature()
+                            .as_array(),
+                        timestamp(),
+                        agave_perf_trace::TransactionState::Executed,
+                    );
                     container.remove_by_id(id);
                 }
 

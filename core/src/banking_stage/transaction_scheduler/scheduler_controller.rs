@@ -7,32 +7,20 @@ use {
         scheduler::{PreLockFilterAction, Scheduler},
         scheduler_error::SchedulerError,
         scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics, SchedulingDetails},
-    },
-    crate::{
+    }, crate::{
         banking_stage::{
-            consume_worker::ConsumeWorkerMetrics,
-            consumer::Consumer,
-            decision_maker::{BufferedPacketsDecision, DecisionMaker},
-            transaction_scheduler::{
+            TOTAL_BUFFERED_PACKETS, consume_worker::ConsumeWorkerMetrics, consumer::Consumer, decision_maker::{BufferedPacketsDecision, DecisionMaker}, transaction_scheduler::{
                 receive_and_buffer::ReceivingStats, transaction_state_container::StateContainer,
-            },
-            TOTAL_BUFFERED_PACKETS,
+            }
         },
         validator::SchedulerPacing,
-    },
-    solana_clock::MAX_PROCESSING_AGE,
-    solana_cost_model::cost_tracker::SharedBlockCost,
-    solana_measure::measure_us,
-    solana_runtime::{bank::Bank, bank_forks::BankForks},
-    solana_svm::transaction_error_metrics::TransactionErrorMetrics,
-    std::{
+    }, agave_perf_trace::flush_transactions, solana_clock::MAX_PROCESSING_AGE, solana_cost_model::cost_tracker::SharedBlockCost, solana_measure::measure_us, solana_runtime::{bank::Bank, bank_forks::BankForks}, solana_svm::transaction_error_metrics::TransactionErrorMetrics, std::{
         num::{NonZeroU64, Saturating},
         sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc, RwLock,
+            Arc, RwLock, atomic::{AtomicBool, Ordering}
         },
         time::{Duration, Instant},
-    },
+    }
 };
 
 #[derive(Clone)]
@@ -140,6 +128,7 @@ where
                 .maybe_report_and_reset_slot(new_leader_slot);
 
             if most_recent_leader_slot != new_leader_slot {
+                flush_transactions();
                 self.container.flush_held_transactions();
                 most_recent_leader_slot = new_leader_slot;
                 cost_pacer = decision.bank().map(|b| {

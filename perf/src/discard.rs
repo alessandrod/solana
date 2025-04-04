@@ -1,6 +1,8 @@
 use {
-    crate::packet::PacketBatch,
+    crate::{get_signature_from_packet, packet::PacketBatch},
     rand::{thread_rng, Rng},
+    solana_signature::SIGNATURE_BYTES,
+    solana_time_utils::timestamp,
 };
 
 pub fn discard_batches_randomly(
@@ -11,6 +13,11 @@ pub fn discard_batches_randomly(
     while total_packets > max_packets {
         let index = thread_rng().gen_range(0..batches.len());
         let removed = batches.swap_remove(index);
+        for packet in removed.iter() {
+            if let Ok(sig) = get_signature_from_packet(&packet) {
+                transaction_discarded(sig, timestamp());
+            }
+        }
         total_packets = total_packets.saturating_sub(removed.len());
     }
     total_packets
@@ -36,4 +43,9 @@ mod tests {
         discard_batches_randomly(&mut batches, max, num_batches);
         assert_eq!(batches.len(), max);
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn transaction_discarded(_signature: &[u8; SIGNATURE_BYTES], ts: u64) {
+    // Placeholder for FFI hook
 }
