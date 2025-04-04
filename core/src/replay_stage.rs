@@ -2610,6 +2610,8 @@ impl ReplayStage {
 
         blockstore.slots_stats.mark_dead(slot);
 
+        slot_dead(slot);
+
         let err = format!("error: {err:?}");
 
         if let Some(slot_status_notifier) = slot_status_notifier {
@@ -3220,6 +3222,7 @@ impl ReplayStage {
         let num_dropped_blocks_on_fork = stats.num_dropped_blocks_on_fork + new_dropped_blocks;
 
         let bank_progress = progress.entry(bank.slot()).or_insert_with(|| {
+            blockstore_processor::slot_start(bank.slot());
             ForkProgress::new_from_bank(
                 &bank,
                 my_pubkey,
@@ -3583,6 +3586,12 @@ impl ReplayStage {
                         .cluster_slots_update_sender
                         .send(vec![bank_slot]);
                 }
+                blockstore_processor::slot_complete(
+                    bank.slot(),
+                    r_replay_progress.num_shreds,
+                    r_replay_progress.num_entries,
+                    r_replay_progress.num_txs,
+                );
 
                 if let Some(transaction_status_sender) = process_active_banks_context
                     .transaction_status_sender
@@ -10244,4 +10253,10 @@ pub(crate) mod tests {
             &mut PurgeRepairSlotCounter::default(),
         );
     }
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn slot_dead(slot: Slot) {
+    log::trace!("slot dead {slot}");
 }

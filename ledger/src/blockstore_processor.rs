@@ -969,6 +969,10 @@ pub fn process_blockstore_from_root(
     };
 
     info!("Processing ledger from slot {start_slot}...");
+    process_blockstore_start();
+    defer! {
+        process_blockstore_end();
+    }
     let now = Instant::now();
 
     // Ensure start_slot is rooted for correct replay; also ensure start_slot and
@@ -1055,6 +1059,18 @@ pub fn process_blockstore_from_root(
     Ok(())
 }
 
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn process_blockstore_start() {
+    log::trace!("process blockstore start");
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn process_blockstore_end() {
+    log::trace!("process blockstore end");
+}
+
 /// Verify that a segment of entries has the correct number of ticks and hashes
 fn verify_ticks(
     bank: &Bank,
@@ -1132,6 +1148,8 @@ fn confirm_full_slot(
         }
     }
 
+    slot_start(slot);
+
     confirm_slot(
         blockstore,
         bank,
@@ -1148,6 +1166,12 @@ fn confirm_full_slot(
         migration_status,
     )?;
 
+    slot_complete(
+        slot,
+        progress.num_shreds,
+        progress.num_entries,
+        progress.num_txs,
+    );
     timing.accumulate(&confirmation_timing.batch_execute.totals);
 
     if !bank.is_complete() {
@@ -5833,4 +5857,16 @@ pub mod tests {
             ChainedBlockIdCheck::Pass
         ));
     }
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn slot_start(slot: Slot) {
+    log::trace!("slot start {slot}");
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn slot_complete(slot: Slot, num_shreds: u64, num_entries: usize, num_txs: usize) {
+    log::trace!("slot complete {slot} {num_shreds} {num_entries} {num_txs}");
 }

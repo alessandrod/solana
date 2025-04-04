@@ -892,6 +892,10 @@ fn main() {
         .long("allow-dead-slots")
         .takes_value(false)
         .help("Output dead slots as well");
+    let no_block_cost_limits_arg = Arg::with_name("no_block_cost_limits")
+        .long("no-block-cost-limits")
+        .takes_value(false)
+        .help("Disable block cost limits effectively by setting them to the max");
     let hashes_per_tick = Arg::with_name("hashes_per_tick")
         .long("hashes-per-tick")
         .value_name("NUM_HASHES|\"sleep\"")
@@ -1233,12 +1237,7 @@ fn main() {
                             "Exits with failed status early as soon as any bad block is detected",
                         ),
                 )
-                .arg(
-                    Arg::with_name("no_block_cost_limits")
-                        .long("no-block-cost-limits")
-                        .takes_value(false)
-                        .help("Disable block cost limits effectively by setting them to the max"),
-                )
+                .arg(&no_block_cost_limits_arg)
                 .arg(
                     Arg::with_name("enable_hash_overrides")
                         .long("enable-hash-overrides")
@@ -1292,6 +1291,7 @@ fn main() {
                 .args(&snapshot_config_args)
                 .arg(&hard_forks_arg)
                 .arg(&snapshot_version_arg)
+                .arg(&no_block_cost_limits_arg)
                 .arg(&geyser_plugin_args)
                 .arg(&log_messages_bytes_limit_arg)
                 .arg(
@@ -1560,12 +1560,7 @@ fn main() {
                         .required(true)
                         .help("Start simulation at the given slot"),
                 )
-                .arg(
-                    Arg::with_name("no_block_cost_limits")
-                        .long("no-block-cost-limits")
-                        .takes_value(false)
-                        .help("Disable block cost limits effectively by setting them to the max"),
-                ),
+                .arg(&no_block_cost_limits_arg),
         )
         .subcommand(
             SubCommand::with_name("accounts")
