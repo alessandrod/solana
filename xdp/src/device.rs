@@ -146,6 +146,7 @@ impl NetworkDevice {
         const ETHTOOL_GRINGPARAM: u32 = 0x00000010;
 
         #[repr(C)]
+        #[derive(Debug)]
         struct EthtoolRingParam {
             cmd: u32,
             rx_max_pending: u32,
@@ -300,11 +301,13 @@ impl RingProducer {
         }
     }
 
+    #[inline]
     pub fn available(&self) -> u32 {
         self.size
             .saturating_sub(self.cached_producer.wrapping_sub(self.cached_consumer))
     }
 
+    #[inline]
     pub fn produce(&mut self) -> Option<u32> {
         if self.available() == 0 {
             return None;
@@ -315,10 +318,12 @@ impl RingProducer {
         Some(index)
     }
 
+    #[inline]
     pub fn commit(&mut self) {
         unsafe { (*self.producer).store(self.cached_producer, Ordering::Release) };
     }
 
+    #[inline]
     pub fn sync(&mut self, commit: bool) {
         if commit {
             self.commit();

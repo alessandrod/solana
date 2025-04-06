@@ -289,6 +289,7 @@ impl<F: Frame> TxRing<F> {
         }
     }
 
+    #[inline]
     pub fn write(&mut self, frame: F, options: u32) -> Result<(), RingFull<F>> {
         let Some(index) = self.producer.produce() else {
             return Err(RingFull(frame));
@@ -305,10 +306,12 @@ impl<F: Frame> TxRing<F> {
         Ok(())
     }
 
+    #[inline]
     pub fn needs_wakeup(&self) -> bool {
         unsafe { (*self.mmap.flags).load(Ordering::Relaxed) & XDP_RING_NEED_WAKEUP != 0 }
     }
 
+    #[inline]
     pub fn wake(&self) -> Result<u64, io::Error> {
         let result = unsafe { sendto(self.fd, ptr::null(), 0, libc::MSG_DONTWAIT, ptr::null(), 0) };
         if result < 0 {
@@ -317,18 +320,22 @@ impl<F: Frame> TxRing<F> {
         Ok(result as u64)
     }
 
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.size as usize
     }
 
+    #[inline]
     pub fn available(&self) -> usize {
         self.producer.available() as usize
     }
 
+    #[inline]
     pub fn commit(&mut self) {
         self.producer.commit();
     }
 
+    #[inline]
     pub fn sync(&mut self, commit: bool) {
         self.producer.sync(commit);
     }

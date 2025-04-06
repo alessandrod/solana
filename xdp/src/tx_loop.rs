@@ -15,17 +15,19 @@ use {
     },
     caps::{
         CapSet,
-        Capability::{CAP_NET_ADMIN, CAP_NET_RAW},
+        Capability::{CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_NICE},
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
     libc::{sysconf, _SC_PAGESIZE},
     std::{
+        io,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         thread,
         time::Duration,
     },
 };
 
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
     cpu_id: usize,
@@ -67,7 +69,7 @@ pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
     let RingSizes {
         rx: rx_size,
         tx: tx_size,
-    } = queue.ring_sizes().unwrap_or_else(|| {
+    } = dbg!(queue.ring_sizes()).unwrap_or_else(|| {
         log::info!(
             "using default ring sizes for {} queue {queue_id:?}",
             dev.name()
@@ -75,7 +77,7 @@ pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
         RingSizes::default()
     });
 
-    let frame_count = (rx_size + tx_size) * 2;
+    let frame_count = rx_size + tx_size;
 
     // try to allocate huge pages first, then fall back to regular pages
     const HUGE_2MB: usize = 2 * 1024 * 1024;
@@ -89,9 +91,12 @@ pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
     let umem = SliceUmem::new(&mut memory, frame_size as u32).unwrap();
 
     // we need NET_ADMIN and NET_RAW for the socket
-    for cap in [CAP_NET_ADMIN, CAP_NET_RAW] {
+    for cap in [CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_NICE] {
         caps::raise(None, CapSet::Effective, cap).unwrap();
     }
+
+    let (min, max) = fifo_priority_bounds().unwrap();
+    set_current_thread_sched_fifo(max).unwrap();
 
     let Ok((mut socket, tx)) = Socket::tx(queue, umem, zero_copy, tx_size * 2, tx_size) else {
         panic!("failed to create AF_XDP socket on queue {queue_id:?}");
@@ -283,6 +288,7 @@ pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
                     kick(&ring);
                 }
             }
+            // std::mem::forget((addrs, payload));
             let _ = drop_sender.try_send((addrs, payload));
         }
         debug_assert_eq!(batched_packets, 0);
@@ -291,7 +297,7 @@ pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
 
     // drain the ring
     while umem.available() < umem_tx_capacity || ring.available() < ring.capacity() {
-        log::debug!(
+        eprintln!(
             "draining xdp ring umem {}/{} ring {}/{}",
             umem.available(),
             umem_tx_capacity,
@@ -337,4 +343,32 @@ fn kick_error(e: std::io::Error) {
             log::error!("network interface driver error: {e:?}");
         }
     }
+}
+
+/// Return min/max valid priorities for SCHED_FIFO on this system.
+fn fifo_priority_bounds() -> io::Result<(i32, i32)> {
+    unsafe {
+        let min = libc::sched_get_priority_min(libc::SCHED_FIFO);
+        let max = libc::sched_get_priority_max(libc::SCHED_FIFO);
+        if min == -1 || max == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((min, max))
+    }
+}
+
+/// Set the calling thread to SCHED_FIFO with the given priority.
+/// Requires CAP_SYS_NICE or a suitable RLIMIT_RTPRIO.
+pub fn set_current_thread_sched_fifo(priority: i32) -> io::Result<()> {
+    unsafe {
+        let param = libc::sched_param {
+            sched_priority: priority,
+        };
+        // pid == 0 means “calling thread” on Linux.
+        let rc = libc::sched_setscheduler(0, libc::SCHED_FIFO, &param);
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }

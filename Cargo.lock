@@ -650,7 +650,10 @@ version = "3.1.0"
 dependencies = [
  "aya",
  "caps",
+ "clap 4.5.31",
+ "core_affinity",
  "crossbeam-channel",
+ "ctrlc",
  "libc",
  "log",
  "thiserror 2.0.17",

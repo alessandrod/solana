@@ -48,6 +48,7 @@ pub struct SliceUmemFrame<'a> {
 }
 
 impl SliceUmemFrame<'_> {
+    #[inline]
     pub fn set_len(&mut self, len: usize) {
         self.len = len;
     }
