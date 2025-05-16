@@ -117,6 +117,11 @@ struct RetransmitStats {
     slot_stats: LruCache<Slot, RetransmitSlotStats>,
     unknown_shred_slot_leader: usize,
 }
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn retransmit_stats(num_nodes: usize, num_shreds: usize) {
+    log::trace!("retransmit {num_nodes} {num_shreds}");
+}
 
 impl RetransmitStats {
     fn maybe_submit(
@@ -127,10 +132,12 @@ impl RetransmitStats {
         cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
         is_xdp: bool,
     ) {
-        const SUBMIT_CADENCE: Duration = Duration::from_secs(2);
+        const SUBMIT_CADENCE: Duration = Duration::from_secs(1);
+
         if self.since.elapsed() < SUBMIT_CADENCE {
             return;
         }
+        retransmit_stats(self.num_nodes.load(Ordering::Relaxed), self.num_shreds);
         cluster_nodes_cache
             .get(root_bank.slot(), root_bank, working_bank, cluster_info)
             .submit_metrics("cluster_nodes_retransmit", timestamp());
