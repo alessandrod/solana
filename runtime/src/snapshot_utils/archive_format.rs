@@ -78,6 +78,42 @@ impl FromStr for ArchiveFormat {
     }
 }
 
+pub enum ArchiveFormatDecompressor<R> {
+    Bzip2(bzip2::bufread::BzDecoder<R>),
+    Gzip(flate2::bufread::GzDecoder<R>),
+    Zstd(zstd::stream::read::Decoder<'static, R>),
+    Lz4(lz4::Decoder<R>),
+    Uncompressed(R),
+}
+
+impl<R: std::io::BufRead> ArchiveFormatDecompressor<R> {
+    pub fn new(format: ArchiveFormat, input: R) -> std::io::Result<Self> {
+        Ok(match format {
+            ArchiveFormat::TarBzip2 => Self::Bzip2(bzip2::bufread::BzDecoder::new(input)),
+            ArchiveFormat::TarGzip => Self::Gzip(flate2::bufread::GzDecoder::new(input)),
+            ArchiveFormat::TarZstd { .. } => {
+                Self::Zstd(zstd::stream::read::Decoder::with_buffer(input)?)
+            }
+            ArchiveFormat::TarLz4 => {
+                Self::Lz4(lz4::Decoder::new(input).map_err(|e| std::io::Error::other(e))?)
+            }
+            ArchiveFormat::Tar => Self::Uncompressed(input),
+        })
+    }
+}
+
+impl<R: std::io::BufRead> std::io::Read for ArchiveFormatDecompressor<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Bzip2(decoder) => decoder.read(buf),
+            Self::Gzip(decoder) => decoder.read(buf),
+            Self::Zstd(decoder) => decoder.read(buf),
+            Self::Lz4(decoder) => decoder.read(buf),
+            Self::Uncompressed(reader) => reader.read(buf),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ParseError {
     InvalidExtension(String),
