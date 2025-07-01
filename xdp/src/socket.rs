@@ -108,7 +108,7 @@ impl<U: Umem> Socket<U> {
                 tx_completion_ring_size as u32,
             );
 
-            let rx_fill_ring = RxFillRing::new(
+            let mut rx_fill_ring = RxFillRing::new(
                 mmap_ring(
                     fd.as_raw_fd(),
                     rx_fill_ring_size.saturating_mul(mem::size_of::<u64>()),
@@ -118,6 +118,8 @@ impl<U: Umem> Socket<U> {
                 rx_fill_ring_size as u32,
                 fd.as_raw_fd(),
             );
+            rx_fill_ring.write_lol().unwrap();
+            rx_fill_ring.commit();
 
             let tx_ring = Some(TxRing::new(
                 mmap_ring(
@@ -186,7 +188,15 @@ impl<U: Umem> Socket<U> {
         completion_size: usize,
         ring_size: usize,
     ) -> Result<(Self, Tx<U::Frame>), io::Error> {
-        let (socket, _, tx) = Self::new(queue, umem, zero_copy, 1, 1, completion_size, ring_size)?;
+        let (socket, _, tx) = Self::new(
+            queue,
+            umem,
+            zero_copy,
+            2048,
+            2048,
+            completion_size,
+            ring_size,
+        )?;
         Ok((socket, tx))
     }
 

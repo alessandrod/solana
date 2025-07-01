@@ -122,9 +122,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .unwrap();
 
-    let umem = SliceUmem::new(&mut *memory, frame_size as u32).unwrap();
+    let umem = SliceUmem::new(&mut memory, frame_size as u32).unwrap();
     let (mut socket, tx) =
-        Socket::tx(dev.open_queue(QueueId(0)), umem, opt.zero_copy, 4096, 2048).unwrap();
+        Socket::tx(dev.open_queue(QueueId(0)), umem, opt.zero_copy, 2048, 2048).unwrap();
 
     for cap in [
         Capability::CAP_NET_ADMIN,

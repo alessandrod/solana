@@ -76,7 +76,7 @@ impl<'a> SliceUmem<'a> {
         debug_assert!(frame_size.is_power_of_two());
         let capacity = buffer.len() / frame_size as usize;
         Ok(Self {
-            available_frames: Vec::from_iter(0..capacity as u64),
+            available_frames: Vec::from_iter(2048..capacity as u64),
             capacity,
             frame_size,
             buffer,
