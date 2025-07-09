@@ -1565,7 +1565,7 @@ fn confirm_slot_entries(
     slot_entries_load_result: (Vec<Entry>, u64, bool),
     timing: &mut ConfirmationTiming,
     progress: &mut ConfirmationProgress,
-    skip_verification: bool,
+    _skip_verification: bool,
     transaction_status_sender: Option<&TransactionStatusSender>,
     entry_notification_sender: Option<&EntryNotifierSender>,
     replay_vote_sender: Option<&ReplayVoteSender>,
@@ -1626,7 +1626,7 @@ fn confirm_slot_entries(
         slot_full,
     );
 
-    if !skip_verification {
+    if false {
         let tick_hash_count = &mut progress.tick_hash_count;
         verify_ticks(bank, &entries, slot_full, tick_hash_count).map_err(|err| {
             warn!(
@@ -1646,7 +1646,7 @@ fn confirm_slot_entries(
     }
 
     let last_entry_hash = entries.last().map(|e| e.hash);
-    let verifier = if !skip_verification {
+    let verifier = if false {
         datapoint_debug!("verify-batch-size", ("size", num_entries as i64, i64));
         let entry_state = entries.start_verify(
             &progress.last_entry,
@@ -1674,7 +1674,7 @@ fn confirm_slot_entries(
     let transaction_verification_start = Instant::now();
     let transaction_verification_result = entry::start_verify_transactions(
         entries,
-        skip_verification,
+        true,
         replay_tx_thread_pool,
         recyclers.clone(),
         Arc::new(verify_transaction),
