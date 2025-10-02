@@ -30,6 +30,7 @@ pub struct TransmitShredsStats {
     pub(crate) dropped_packets_udp: usize,
     pub(crate) dropped_packets_quic: usize,
     pub(crate) dropped_packets_xdp: usize,
+    pub(crate) is_xdp: bool,
 }
 
 impl BroadcastStats for TransmitShredsStats {
@@ -49,6 +50,7 @@ impl BroadcastStats for TransmitShredsStats {
         if was_interrupted {
             datapoint_info!(
                 "broadcast-transmit-shreds-interrupted-stats",
+                "is_xdp" => self.is_xdp.to_string(),
                 ("slot", slot as i64, i64),
                 ("transmit_elapsed", self.transmit_elapsed as i64, i64),
                 ("send_mmsg_elapsed", self.send_mmsg_elapsed as i64, i64),
@@ -68,6 +70,7 @@ impl BroadcastStats for TransmitShredsStats {
         } else {
             datapoint_info!(
                 "broadcast-transmit-shreds-stats",
+                "is_xdp" => self.is_xdp.to_string(),
                 ("slot", slot as i64, i64),
                 (
                     "end_to_end_elapsed",
