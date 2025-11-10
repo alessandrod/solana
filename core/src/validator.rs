@@ -156,7 +156,7 @@ use {
     std::{
         borrow::Cow,
         collections::{HashMap, HashSet},
-        net::SocketAddr,
+        net::{IpAddr, SocketAddr},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::FromStr,
@@ -1578,7 +1578,10 @@ impl Validator {
                     .local_addr()
                     .expect("failed to get local address")
                     .port();
-                let (rtx, sender) = XdpRetransmitter::new(xdp_config, src_port)
+                let IpAddr::V4(src_ip) = node.bind_ip_addrs.active() else {
+                    panic!("IPv6 not supported");
+                };
+                let (rtx, sender) = XdpRetransmitter::new(xdp_config, src_port, src_ip)
                     .expect("failed to create xdp retransmitter");
                 (Some(rtx), Some(sender))
             } else {

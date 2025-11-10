@@ -13,7 +13,11 @@ use {
 use {
     crossbeam_channel::{Sender, TrySendError},
     solana_ledger::shred,
-    std::{error::Error, net::SocketAddr, thread},
+    std::{
+        error::Error,
+        net::{Ipv4Addr, SocketAddr},
+        thread,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -105,12 +109,20 @@ pub struct XdpRetransmitter {
 
 impl XdpRetransmitter {
     #[cfg(not(target_os = "linux"))]
-    pub fn new(_config: XdpConfig, _src_port: u16) -> Result<(Self, XdpSender), Box<dyn Error>> {
+    pub fn new(
+        _config: XdpConfig,
+        _src_port: u16,
+        _src_ip: Ipv4Addr,
+    ) -> Result<(Self, XdpSender), Box<dyn Error>> {
         Err("XDP is only supported on Linux".into())
     }
 
     #[cfg(target_os = "linux")]
-    pub fn new(config: XdpConfig, src_port: u16) -> Result<(Self, XdpSender), Box<dyn Error>> {
+    pub fn new(
+        config: XdpConfig,
+        src_port: u16,
+        src_ip: Ipv4Addr,
+    ) -> Result<(Self, XdpSender), Box<dyn Error>> {
         use caps::{
             CapSet,
             Capability::{CAP_BPF, CAP_NET_ADMIN, CAP_NET_RAW, CAP_PERFMON},
@@ -187,7 +199,7 @@ impl XdpRetransmitter {
                             QueueId(i as u64),
                             config.zero_copy,
                             None,
-                            None,
+                            src_ip,
                             src_port,
                             None,
                             receiver,

@@ -54,6 +54,7 @@ Release channels have their own copy of this changelog:
 
 #### Breaking
 * When XDP is enabled, the validator process requires the `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_BPF`, and `CAP_PERFMON` capabilities. These can be configured in the systemd service file by setting `CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_BPF CAP_PERFMON` under the `[Service]` section or directly on the binary with the command `sudo setcap cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon=p <path/to/agave-validator>` (this command must be run each time the binary is replaced)
+* When XDP is enabled on a host with a tunnel interface, you must pass in `--experimental-retransmit-xdp-interface <real-interface>`. Otherwise, your host will try to attach the xdp program to the bonded/tunnel interface, which isn't a physical interface.
 * Require increased `memlock` limits - recommended setting is `LimitMEMLOCK=2000000000` in systemd service configuration. Lack of sufficient limit (on Linux) will cause startup error.
 * Remove deprecated arguments
   * `--accounts-index-memory-limit-mb`
