@@ -199,8 +199,6 @@ pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
                 } else {
                     let next_hop = router.route(addr.ip()).unwrap();
 
-                    let mut skip = false;
-
                     // we need the MAC address to send the packet
                     if next_hop.mac_addr.is_none() {
                         log::warn!(
@@ -208,14 +206,10 @@ pub fn tx_loop<T: AsRef<[u8]>, A: AsRef<[SocketAddr]>>(
                              has no known MAC address",
                             next_hop.ip_addr
                         );
-                        skip = true;
-                    };
-
-                    if skip {
                         batched_packets -= 1;
                         umem.release(frame.offset());
                         continue;
-                    }
+                    };
 
                     next_hop.mac_addr.unwrap()
                 };

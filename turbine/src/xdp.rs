@@ -15,6 +15,7 @@ use {
     solana_ledger::shred,
     std::{
         error::Error,
+        io,
         net::{Ipv4Addr, SocketAddr},
         thread,
     },
@@ -219,4 +220,28 @@ impl XdpRetransmitter {
         }
         Ok(())
     }
+}
+
+/// If `interface` is Some and is a bond slave, prefer the master's IPv4.
+/// Else use the interface's IPv4.
+/// If `interface` is None, use the default route device's IPv4.
+#[cfg(target_os = "linux")]
+pub fn resolve_src_ipv4(interface: Option<&str>) -> io::Result<Ipv4Addr> {
+    if let Some(iface) = interface {
+        // Try to detect bond master ifindex from sysfs
+        let master_ifindex_path = format!("/sys/class/net/{iface}/master/ifindex");
+        if let Ok(contents) = std::fs::read_to_string(&master_ifindex_path) {
+            if let Ok(idx) = contents.trim().parse::<u32>() {
+                return NetworkDevice::new_from_index(idx).and_then(|dev| dev.ipv4_addr());
+            }
+        }
+        NetworkDevice::new(iface).and_then(|dev| dev.ipv4_addr())
+    } else {
+        NetworkDevice::new_from_default_route().and_then(|dev| dev.ipv4_addr())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn resolve_src_ipv4(_interface: Option<&str>) -> io::Result<Ipv4Addr> {
+    Err(io::Error::other("XDP is only supported on Linux"))
 }

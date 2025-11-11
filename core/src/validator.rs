@@ -147,7 +147,7 @@ use {
     solana_turbine::{
         self,
         broadcast_stage::BroadcastStageType,
-        xdp::{XdpConfig, XdpRetransmitter},
+        xdp::{resolve_src_ipv4, XdpConfig, XdpRetransmitter},
     },
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     solana_validator_exit::Exit,
@@ -1578,8 +1578,17 @@ impl Validator {
                     .local_addr()
                     .expect("failed to get local address")
                     .port();
-                let IpAddr::V4(src_ip) = node.bind_ip_addrs.active() else {
-                    panic!("IPv6 not supported");
+                let src_ip = match node.bind_ip_addrs.active() {
+                    IpAddr::V4(ip) if !ip.is_unspecified() => ip,
+                    IpAddr::V4(_unspecified) => resolve_src_ipv4(xdp_config.interface.as_deref())
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "Unable to resolve IPv4 source address for XDP (bind-address is \
+                                 0.0.0.0, interface: {:?}): {}",
+                                xdp_config.interface, e
+                            )
+                        }),
+                    _ => panic!("IPv6 not supported"),
                 };
                 let (rtx, sender) = XdpRetransmitter::new(xdp_config, src_port, src_ip)
                     .expect("failed to create xdp retransmitter");
