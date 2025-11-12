@@ -15,7 +15,6 @@ use {
     solana_ledger::shred,
     std::{
         error::Error,
-        io,
         net::{Ipv4Addr, SocketAddr},
         thread,
     },
@@ -113,7 +112,7 @@ impl XdpRetransmitter {
     pub fn new(
         _config: XdpConfig,
         _src_port: u16,
-        _src_ip: Ipv4Addr,
+        _src_ip: Option<Ipv4Addr>,
     ) -> Result<(Self, XdpSender), Box<dyn Error>> {
         Err("XDP is only supported on Linux".into())
     }
@@ -122,7 +121,7 @@ impl XdpRetransmitter {
     pub fn new(
         config: XdpConfig,
         src_port: u16,
-        src_ip: Ipv4Addr,
+        src_ip: Option<Ipv4Addr>,
     ) -> Result<(Self, XdpSender), Box<dyn Error>> {
         use caps::{
             CapSet,
@@ -200,7 +199,7 @@ impl XdpRetransmitter {
                             QueueId(i as u64),
                             config.zero_copy,
                             None,
-                            Some(src_ip),
+                            src_ip,
                             src_port,
                             None,
                             receiver,
@@ -222,26 +221,26 @@ impl XdpRetransmitter {
     }
 }
 
-/// If `interface` is Some and is a bond slave, prefer the master's IPv4.
-/// Else use the interface's IPv4.
-/// If `interface` is None, use the default route device's IPv4.
+/// Returns the IPv4 address of the master interface if the given interface is part of a bond.
 #[cfg(target_os = "linux")]
-pub fn resolve_src_ipv4(interface: Option<&str>) -> io::Result<Ipv4Addr> {
-    if let Some(iface) = interface {
-        // Try to detect bond master ifindex from sysfs
-        let master_ifindex_path = format!("/sys/class/net/{iface}/master/ifindex");
-        if let Ok(contents) = std::fs::read_to_string(&master_ifindex_path) {
-            if let Ok(idx) = contents.trim().parse::<u32>() {
-                return NetworkDevice::new_from_index(idx).and_then(|dev| dev.ipv4_addr());
-            }
-        }
-        NetworkDevice::new(iface).and_then(|dev| dev.ipv4_addr())
-    } else {
-        NetworkDevice::new_from_default_route().and_then(|dev| dev.ipv4_addr())
+pub fn master_ip_if_bonded(interface: &str) -> Option<Ipv4Addr> {
+    let master_ifindex_path = format!("/sys/class/net/{interface}/master/ifindex");
+    if let Ok(contents) = std::fs::read_to_string(&master_ifindex_path) {
+        let idx = contents.trim().parse().unwrap();
+        return Some(
+            NetworkDevice::new_from_index(idx)
+                .and_then(|dev| dev.ipv4_addr())
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "failed to open bond master interface for {interface}: master index {idx}: {e}"
+                    )
+                }),
+        );
     }
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn resolve_src_ipv4(_interface: Option<&str>) -> io::Result<Ipv4Addr> {
+pub fn master_ip_if_bonded(_interface: &str) -> io::Result<Ipv4Addr> {
     Err(io::Error::other("XDP is only supported on Linux"))
 }
