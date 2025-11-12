@@ -200,7 +200,7 @@ impl XdpRetransmitter {
                             QueueId(i as u64),
                             config.zero_copy,
                             None,
-                            src_ip,
+                            Some(src_ip),
                             src_port,
                             None,
                             receiver,
