@@ -57,7 +57,7 @@ solana-message = { workspace = true, optional = true }
 solana-program-entrypoint = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-rent = { workspace = true }
-solana-sbpf = { workspace = true, features = ["jit"] }
+solana-sbpf = { workspace = true, features = ["jit", "jit-enable-host-stack-frames"] }
 solana-sdk-ids = { workspace = true }
 solana-slot-hashes = { workspace = true }
 solana-stable-layout = { workspace = true }
