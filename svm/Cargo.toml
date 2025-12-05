@@ -110,7 +110,7 @@ solana-program-binaries = { workspace = true }
 solana-program-runtime = { workspace = true, features = ["dev-context-only-utils"] }
 solana-pubkey = { workspace = true, features = ["rand"] }
 solana-rent = { workspace = true }
-solana-sbpf = { workspace = true, features = ["jit"] }
+solana-sbpf = { workspace = true, features = ["jit", "jit-enable-host-stack-frames"] }
 solana-secp256k1-program = { workspace = true, features = ["bincode"] }
 solana-secp256r1-program = { workspace = true, features = ["openssl-vendored"] }
 solana-signature = { workspace = true, features = ["rand"] }
