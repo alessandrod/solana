@@ -1415,15 +1415,11 @@ mod tests {
         solana_clock::Slot,
         solana_pubkey::Pubkey,
         solana_sbpf::{elf::Executable, program::BuiltinProgram},
-        std::{
-            fs::File,
-            io::Read,
-            ops::ControlFlow,
-            sync::{
-                Arc, RwLock,
-                atomic::{AtomicU64, Ordering},
-            },
+        solana_svm_type_overrides::sync::{
+            Arc, RwLock,
+            atomic::{AtomicU64, Ordering},
         },
+        std::{fs::File, io::Read, ops::ControlFlow},
         test_case::{test_case, test_matrix},
     };
 
