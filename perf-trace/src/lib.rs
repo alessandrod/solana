@@ -19,12 +19,12 @@ use std::{
     array,
     cell::{OnceCell, UnsafeCell},
     hint::black_box,
-    mem,
+    mem::transmute,
+    num::NonZero,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        LazyLock, RwLock,
+        LazyLock, Once, RwLock,
     },
-    time::Duration,
 };
 
 #[repr(u64)]
@@ -36,55 +36,79 @@ pub enum TransactionState {
     Executed,
 }
 
-struct EventBufs {
-    event_bufs: RwLock<[UnsafeCell<Vec<Event>>; 100]>,
+struct EventBufs<T> {
+    event_bufs: RwLock<[UnsafeCell<Vec<T>>; 100]>,
     next_slot: AtomicUsize,
 }
 
-impl EventBufs {
-    fn new() -> Self {
+impl<T> EventBufs<T> {
+    fn new(capacity: usize) -> Self {
         Self {
-            event_bufs: RwLock::new(array::from_fn(|_| UnsafeCell::new(Vec::new()))),
+            event_bufs: RwLock::new(array::from_fn(|_| {
+                UnsafeCell::new(Vec::with_capacity(capacity))
+            })),
             next_slot: AtomicUsize::new(0),
         }
     }
 
     fn next_slot(&self) -> usize {
-        self.next_slot.fetch_add(1, Ordering::Relaxed)
+        self.next_slot
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |slot| {
+                if slot + 1 == 100 {
+                    Some(50)
+                } else {
+                    Some(slot + 1)
+                }
+            })
+            .unwrap()
     }
 }
 
-unsafe impl Sync for EventBufs {}
+unsafe impl<T> Sync for EventBufs<T> {}
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct Event {
+struct TransactionEvent {
     signature: [u8; 64],
     timestamp: u64,
     state: u64,
 }
 
-static TRANSACTIONS: LazyLock<EventBufs> = LazyLock::new(|| EventBufs::new());
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SvmTransactionEvent {
+    signature: [u8; 64],
+    start: u64,
+    end: u64,
+    tid: u64,
+}
 
-const SUBMIT_BATCH_SIZE: usize = 1000;
+const TRANSACTIONS_BATCH_SIZE: usize = 1000;
+static TRANSACTIONS: LazyLock<EventBufs<TransactionEvent>> =
+    LazyLock::new(|| EventBufs::new(TRANSACTIONS_BATCH_SIZE));
+
+const SVM_TRANSACTIONS_BATCH_SIZE: usize = 1000;
+static SVM_TRANSACTIONS: LazyLock<EventBufs<SvmTransactionEvent>> =
+    LazyLock::new(|| EventBufs::new(SVM_TRANSACTIONS_BATCH_SIZE));
 
 thread_local! {
-    // static INIT: bool = false;
-    static SLOT: OnceCell<usize> = OnceCell::new();
+    static TRANSACTIONS_INDEX: OnceCell<usize> = OnceCell::new();
+    static SVM_TRANSACTIONS_INDEX: OnceCell<usize> = OnceCell::new();
+    static THREAD_ID: OnceCell<u64> = OnceCell::new();
 }
 
 pub fn trace_transaction(signature: &[u8; 64], ts: u64, state: TransactionState) {
-    let slot = SLOT.with(|cell| *cell.get_or_init(|| TRANSACTIONS.next_slot()));
+    let slot = TRANSACTIONS_INDEX.with(|cell| *cell.get_or_init(|| TRANSACTIONS.next_slot()));
 
     let guard = &TRANSACTIONS.event_bufs.read().unwrap();
     let txs = &guard[slot];
     let txs = unsafe { &mut *txs.get() };
-    txs.push(Event {
+    txs.push(TransactionEvent {
         signature: *signature,
         timestamp: ts,
         state: state as u64,
     });
-    if txs.len() == SUBMIT_BATCH_SIZE {
+    if txs.len() == TRANSACTIONS_BATCH_SIZE {
         perf_trace_transactions(txs.as_ptr(), txs.len() as u64);
         txs.clear();
     }
@@ -95,16 +119,7 @@ pub fn flush_transactions() {
     for txs_cell in guard.iter() {
         let txs = unsafe { &mut *txs_cell.get() };
         if !txs.is_empty() {
-            let len = txs.len();
-            txs.resize(
-                SUBMIT_BATCH_SIZE,
-                Event {
-                    signature: [0; 64],
-                    timestamp: 0,
-                    state: 0,
-                },
-            );
-            perf_trace_transactions(txs.as_ptr(), len as u64);
+            perf_trace_transactions(txs.as_ptr(), txs.len() as u64);
             txs.clear();
         }
     }
@@ -113,13 +128,58 @@ pub fn flush_transactions() {
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-fn perf_trace_transactions(txs: *const Event, len: u64) {
+fn perf_trace_transactions(txs: *const TransactionEvent, len: u64) {
     log::trace!("perf_trace_transactions called with len {txs:p} {len}");
 }
 
 #[unsafe(no_mangle)]
 #[inline(never)]
 fn perf_trace_flush_transactions() {
+    black_box(());
+}
+
+pub fn trace_svm_transaction(signature: &[u8; 64], start: u64, end: u64) {
+    let thread_id: u64 = THREAD_ID.with(|cell| *cell.get_or_init(|| gettid()));
+    let slot =
+        SVM_TRANSACTIONS_INDEX.with(|cell| *cell.get_or_init(|| SVM_TRANSACTIONS.next_slot()));
+
+    let guard = &SVM_TRANSACTIONS.event_bufs.read().unwrap();
+    let txs = &guard[slot];
+    let txs = unsafe { &mut *txs.get() };
+
+    txs.push(SvmTransactionEvent {
+        signature: *signature,
+        start,
+        end,
+        tid: thread_id,
+    });
+    if txs.len() == SVM_TRANSACTIONS_BATCH_SIZE {
+        perf_trace_svm_transactions(txs.as_ptr(), txs.len() as u64);
+        txs.clear();
+    }
+}
+
+pub fn flush_svm_transactions() {
+    let guard = &SVM_TRANSACTIONS.event_bufs.write().unwrap();
+    for txs_cell in guard.iter() {
+        let txs = unsafe { &mut *txs_cell.get() };
+        if !txs.is_empty() {
+            perf_trace_svm_transactions(txs.as_ptr(), txs.len() as u64);
+            txs.clear();
+        }
+    }
+    perf_trace_flush_transactions();
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+fn perf_trace_svm_transactions(txs: *const SvmTransactionEvent, len: u64) {
+    log::trace!("perf_trace_svm_transactions called with len {txs:p} {len}");
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+fn perf_trace_flush_svm_transactions() {
     black_box(());
 }
 
@@ -132,4 +192,8 @@ pub fn timestamp() -> u64 {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time_spec as *mut _);
     }
     (time_spec.tv_sec as u64) * 1_000_000_000u64 + (time_spec.tv_nsec as u64)
+}
+
+fn gettid() -> u64 {
+    unsafe { libc::syscall(libc::SYS_gettid) as u64 }
 }

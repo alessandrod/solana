@@ -32,6 +32,7 @@ use {
         voting_service::VoteOp,
         window_service::DuplicateSlotReceiver,
     },
+    agave_perf_trace::flush_svm_transactions,
     agave_votor::root_utils,
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     rayon::{prelude::*, ThreadPool},
@@ -809,6 +810,8 @@ impl ReplayStage {
                     &mut is_alpenglow_migration_complete,
                 );
                 replay_active_banks_time.stop();
+
+                flush_svm_transactions();
 
                 let forks_root = bank_forks.read().unwrap().root();
 

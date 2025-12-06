@@ -16,6 +16,7 @@ use {
         transaction_execution_result::{ExecutedTransaction, TransactionExecutionDetails},
         transaction_processing_result::{ProcessedTransaction, TransactionProcessingResult},
     },
+    agave_perf_trace::{timestamp, trace_svm_transaction},
     log::debug,
     percentage::Percentage,
     solana_account::{state_traits::StateMut, AccountSharedData, ReadableAccount, PROGRAM_OWNERS},
@@ -438,6 +439,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // in the same batch may modify the same accounts. Transaction order is
         // preserved within entries written to the ledger.
         for (tx, check_result) in sanitized_txs.iter().zip(check_results) {
+            let start = timestamp();
             let (validate_result, validate_fees_us) =
                 measure_us!(check_result.and_then(|tx_details| {
                     Self::validate_transaction_nonce_and_fee_payer(
@@ -598,6 +600,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             }
 
             processing_results.push(processing_result);
+            let end = timestamp();
+
+            trace_svm_transaction(tx.signature().as_array(), start, end);
         }
 
         // Skip eviction when there's no chance this particular tx batch has increased the size of
