@@ -343,12 +343,18 @@ impl TransactionViewReceiveAndBuffer {
                 }
 
                 if let Ok(sig) = get_signature_from_packet(&packet) {
-                    trace_transaction(sig, ts, agave_perf_trace::TransactionState::Buffered);
+                    trace_transaction(
+                        packet.flow_id(),
+                        sig,
+                        ts,
+                        agave_perf_trace::TransactionState::Buffered,
+                    );
                 }
 
+                let flow_id = packet.flow_id();
                 // Reserve free-space to copy packet into, run sanitization checks, and insert.
                 if let Some(transaction_id) =
-                    container.try_insert_map_only_with_data(packet_data, |bytes| {
+                    container.try_insert_map_only_with_data(packet_data, flow_id, |bytes| {
                         match Self::try_handle_packet(
                             bytes,
                             root_bank,

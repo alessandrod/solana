@@ -23,6 +23,7 @@ pub(crate) struct TransactionState<Tx> {
     priority: u64,
     /// Estimated cost of the transaction.
     cost: u64,
+    pub flow_id: u64,
 }
 
 impl<Tx> TransactionState<Tx> {
@@ -33,7 +34,12 @@ impl<Tx> TransactionState<Tx> {
             max_age,
             priority,
             cost,
+            flow_id: 0,
         }
+    }
+
+    pub(crate) fn flow_id(&self) -> u64 {
+        self.flow_id
     }
 
     /// Return the priority of the transaction.

@@ -34,11 +34,16 @@ pub const NUM_RCVMMSGS: usize = 64;
 pub struct BytesPacket {
     buffer: Bytes,
     meta: Meta,
+    pub flow_id: u64,
 }
 
 impl BytesPacket {
     pub fn new(buffer: Bytes, meta: Meta) -> Self {
-        Self { buffer, meta }
+        Self {
+            buffer,
+            meta,
+            flow_id: 0,
+        }
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -46,6 +51,7 @@ impl BytesPacket {
         Self {
             buffer: Bytes::new(),
             meta: Meta::default(),
+            flow_id: 0,
         }
     }
 
@@ -58,7 +64,11 @@ impl BytesPacket {
             meta.set_socket_addr(dest);
         }
 
-        Self { buffer, meta }
+        Self {
+            buffer,
+            meta,
+            flow_id: 0,
+        }
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -78,7 +88,11 @@ impl BytesPacket {
             meta.set_socket_addr(dest);
         }
 
-        Ok(Self { buffer, meta })
+        Ok(Self {
+            buffer,
+            meta,
+            flow_id: 0,
+        })
     }
 
     #[inline]
@@ -389,6 +403,13 @@ impl<'a> PacketRef<'a> {
             Self::Bytes(packet) => packet.to_owned().to_owned(),
         }
     }
+
+    pub fn flow_id(&self) -> u64 {
+        match self {
+            Self::Packet(_packet) => 0,
+            Self::Bytes(packet) => packet.flow_id,
+        }
+    }
 }
 
 #[derive(Debug, Eq)]
@@ -470,6 +491,13 @@ impl PacketRefMut<'_> {
         match self {
             Self::Packet(packet) => PacketRef::Packet(packet),
             Self::Bytes(packet) => PacketRef::Bytes(packet),
+        }
+    }
+
+    pub fn flow_id(&self) -> u64 {
+        match self {
+            Self::Packet(_packet) => 0,
+            Self::Bytes(packet) => packet.flow_id,
         }
     }
 }

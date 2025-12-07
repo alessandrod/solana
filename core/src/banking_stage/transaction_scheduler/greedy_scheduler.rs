@@ -292,6 +292,7 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
     let cost = transaction_state.cost();
 
     trace_transaction(
+        transaction_state.flow_id(),
         transaction
             .as_sanitized_transaction()
             .signature()

@@ -260,6 +260,7 @@ impl TransactionViewStateContainer {
     pub(crate) fn try_insert_map_only_with_data(
         &mut self,
         data: &[u8],
+        flow_id: u64,
         f: impl FnOnce(SharedBytes) -> Result<TransactionState<RuntimeTransactionView>, ()>,
     ) -> Option<usize> {
         // Get a vacant entry in the slab.
@@ -287,7 +288,8 @@ impl TransactionViewStateContainer {
         }
 
         // Attempt to insert the transaction.
-        if let Ok(state) = f(Arc::clone(bytes_entry)) {
+        if let Ok(mut state) = f(Arc::clone(bytes_entry)) {
+            state.flow_id = flow_id;
             vacant_entry.insert(state);
             Some(transaction_id)
         } else {
@@ -496,7 +498,7 @@ mod tests {
             let (transaction, _max_age, priority, cost) = test_transaction(priority);
             let packet = Packet::from_data(None, transaction.to_versioned_transaction()).unwrap();
             let id = container
-                .try_insert_map_only_with_data(packet.data(..).unwrap(), |data| {
+                .try_insert_map_only_with_data(packet.data(..).unwrap(), 0, |data| {
                     packet_parser(data, priority, cost)
                 })
                 .unwrap();
@@ -513,7 +515,7 @@ mod tests {
             let (transaction, _max_age, priority, cost) = test_transaction(priority);
             let packet = Packet::from_data(None, transaction.to_versioned_transaction()).unwrap();
             let id = container
-                .try_insert_map_only_with_data(packet.data(..).unwrap(), |data| {
+                .try_insert_map_only_with_data(packet.data(..).unwrap(), 0, |data| {
                     packet_parser(data, priority, cost)
                 })
                 .unwrap();
@@ -532,7 +534,7 @@ mod tests {
         let (transaction, _max_age, priority, cost) = test_transaction(priority);
         let packet = Packet::from_data(None, transaction.to_versioned_transaction()).unwrap();
         let id = container
-            .try_insert_map_only_with_data(packet.data(..).unwrap(), |data| {
+            .try_insert_map_only_with_data(packet.data(..).unwrap(), 0, |data| {
                 packet_parser(data, priority, cost)
             })
             .unwrap();

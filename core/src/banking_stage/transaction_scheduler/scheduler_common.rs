@@ -241,6 +241,10 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
                 // Assumption - retryable indexes are in order (sorted by workers).
                 let mut retryable_iter = retryable_indexes.iter().peekable();
                 for (index, (id, transaction)) in izip!(ids, transactions).enumerate() {
+                    let flow_id = container
+                        .get_mut_transaction_state(id)
+                        .expect("transaction must exist")
+                        .flow_id;
                     if let Some(&retryable_index) = retryable_iter.peek() {
                         if retryable_index.index == index {
                             container.retry_transaction(
@@ -252,14 +256,17 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
                             continue;
                         }
                     }
-                    trace_transaction(
-                        transaction
-                            .as_sanitized_transaction()
-                            .signature()
-                            .as_array(),
-                        timestamp(),
-                        agave_perf_trace::TransactionState::Executed,
-                    );
+                    if flow_id != 0 {
+                        trace_transaction(
+                            flow_id,
+                            transaction
+                                .as_sanitized_transaction()
+                                .signature()
+                                .as_array(),
+                            timestamp(),
+                            agave_perf_trace::TransactionState::Executed,
+                        );
+                    }
                     container.remove_by_id(id);
                 }
 

@@ -103,7 +103,12 @@ pub fn dedup_packets_and_count_discards<const K: usize>(
             {
                 packet.meta_mut().set_discard(true);
                 if let Ok(sig) = get_signature_from_packet_mut(&packet) {
-                    trace_transaction(sig, timestamp(), TransactionState::Deduped);
+                    trace_transaction(
+                        packet.flow_id(),
+                        sig,
+                        timestamp(),
+                        TransactionState::Deduped,
+                    );
                 }
             }
             u64::from(packet.meta().discard())

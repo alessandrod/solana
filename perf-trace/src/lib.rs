@@ -69,6 +69,7 @@ unsafe impl<T> Sync for EventBufs<T> {}
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct TransactionEvent {
+    flow_id: u64,
     signature: [u8; 64],
     timestamp: u64,
     state: u64,
@@ -97,13 +98,14 @@ thread_local! {
     static THREAD_ID: OnceCell<u64> = OnceCell::new();
 }
 
-pub fn trace_transaction(signature: &[u8; 64], ts: u64, state: TransactionState) {
+pub fn trace_transaction(flow_id: u64, signature: &[u8; 64], ts: u64, state: TransactionState) {
     let slot = TRANSACTIONS_INDEX.with(|cell| *cell.get_or_init(|| TRANSACTIONS.next_slot()));
 
     let guard = &TRANSACTIONS.event_bufs.read().unwrap();
     let txs = &guard[slot];
     let txs = unsafe { &mut *txs.get() };
     txs.push(TransactionEvent {
+        flow_id,
         signature: *signature,
         timestamp: ts,
         state: state as u64,

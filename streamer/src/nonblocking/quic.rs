@@ -814,8 +814,12 @@ fn handle_chunks(
         BytesPacket::new(buf.freeze(), accum.meta.clone())
     };
 
+    static FLOW_ID: AtomicU64 = AtomicU64::new(1);
+
     if let Ok(sig) = get_signature_from_packet(&packet) {
-        trace_transaction(sig, accum.ts, TransactionState::Received);
+        let flow_id = FLOW_ID.fetch_add(1, Ordering::Relaxed);
+        trace_transaction(flow_id, sig, accum.ts, TransactionState::Received);
+        packet.flow_id = flow_id;
     }
 
     let packet_size = packet.meta().size;
