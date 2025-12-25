@@ -1,7 +1,10 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use {
-    crate::invoke_context::SerializedAccountMetadata,
+    crate::{
+        invoke_context::SerializedAccountMetadata,
+        mem_pool::{Pool, Reset},
+    },
     solana_instruction::error::InstructionError,
     solana_program_entrypoint::{BPF_ALIGN_OF_U128, MAX_PERMITTED_DATA_INCREASE, NON_DUP_MARKER},
     solana_pubkey::Pubkey,
@@ -16,7 +19,11 @@ use {
         instruction::InstructionContext, instruction_accounts::BorrowedInstructionAccount,
         IndexOfAccount, MAX_ACCOUNTS_PER_INSTRUCTION,
     },
-    std::mem::{self, size_of},
+    std::{
+        array,
+        cell::{RefCell, UnsafeCell},
+        mem::{self, size_of},
+    },
 };
 
 /// Modifies the memory mapping in serialization and CPI return for stricter_abi_and_runtime_constraints
@@ -57,6 +64,18 @@ enum SerializeAccount<'a, 'ix_data> {
     Duplicate(IndexOfAccount),
 }
 
+pub struct RecyclableAlignedMemory(pub AlignedMemory<HOST_ALIGN>);
+
+impl Reset for RecyclableAlignedMemory {
+    fn reset(&mut self) {
+        self.0.clear();
+    }
+}
+
+thread_local! {
+    pub static SERIALIZE_BUFFER_POOL: UnsafeCell<Pool<RecyclableAlignedMemory, 10>> = UnsafeCell::new(Pool::new(array::from_fn(|_| RecyclableAlignedMemory(AlignedMemory::with_capacity(1024 * 1024 * 10)))));
+}
+
 struct Serializer {
     buffer: AlignedMemory<HOST_ALIGN>,
     regions: Vec<MemoryRegion>,
@@ -75,8 +94,14 @@ impl Serializer {
         stricter_abi_and_runtime_constraints: bool,
         account_data_direct_mapping: bool,
     ) -> Serializer {
+        let buffer = SERIALIZE_BUFFER_POOL.with(|pool| unsafe {
+            (&mut *pool.get())
+                .get_matching(|recyclable| recyclable.0.capacity() >= size)
+                .map(|recyclable| recyclable.0)
+                .unwrap_or_else(|| AlignedMemory::with_capacity(size))
+        });
         Serializer {
-            buffer: AlignedMemory::with_capacity(size),
+            buffer,
             regions: Vec::new(),
             region_start: 0,
             vaddr: start_addr,
