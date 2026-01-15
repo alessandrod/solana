@@ -10523,6 +10523,8 @@ checksum = "dcf09694a0fc14e5ffb18f9b7b7c0f15ecb6eac5b5610bf76a1853459d19daf9"
 [[package]]
 name = "solana-sbpf"
 version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b15b079e08471a9dbfe1e48b2c7439c85aa2a055cbd54eddd8bd257b0a7dbb29"
 dependencies = [
  "byteorder",
  "combine 3.8.1",
@@ -11790,7 +11792,6 @@ dependencies = [
  "derive-where",
  "derive_more 2.1.0",
  "dyn-clone",
- "libc",
  "log",
  "scopeguard",
  "solana-clock",
@@ -11813,7 +11814,6 @@ dependencies = [
  "solana-unified-scheduler-pool",
  "static_assertions",
  "test-case",
- "tikv-jemalloc-sys",
  "trait-set",
  "unwrap_none",
  "vec_extract_if_polyfill",

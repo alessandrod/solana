@@ -1683,17 +1683,13 @@ fn execute<'a, 'b: 'a>(
 
     let mut deserialize_time = Measure::start("deserialize");
     let execute_or_deserialize_result = execution_result.and_then(|_| {
-        let ret = deserialize_parameters(
+        deserialize_parameters(
             invoke_context,
             parameter_bytes.as_slice(),
             stricter_abi_and_runtime_constraints,
             account_data_direct_mapping,
         )
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>);
-        serialization::SERIALIZE_BUFFER_POOL.with(|pool| unsafe {
-            (&mut *pool.get()).put(serialization::RecyclableAlignedMemory(parameter_bytes));
-        });
-        ret
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
     });
     deserialize_time.stop();
 

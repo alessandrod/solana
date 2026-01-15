@@ -7,17 +7,17 @@ use {
     std::array,
 };
 
-pub trait Reset {
+trait Reset {
     fn reset(&mut self);
 }
 
-pub struct Pool<T: Reset, const SIZE: usize> {
+struct Pool<T: Reset, const SIZE: usize> {
     items: [Option<T>; SIZE],
     next_empty: usize,
 }
 
 impl<T: Reset, const SIZE: usize> Pool<T, SIZE> {
-    pub fn new(items: [T; SIZE]) -> Self {
+    fn new(items: [T; SIZE]) -> Self {
         Self {
             items: items.map(|i| Some(i)),
             next_empty: SIZE,
@@ -28,23 +28,7 @@ impl<T: Reset, const SIZE: usize> Pool<T, SIZE> {
         SIZE
     }
 
-    pub fn get_matching(&mut self, predicate: impl Fn(&T) -> bool) -> Option<T> {
-        for i in (0..self.next_empty).rev() {
-            if let Some(item) = &self.items[i] {
-                if predicate(item) {
-                    let item = self.items[i].take();
-                    self.next_empty = self.next_empty.saturating_sub(1);
-                    if i != self.next_empty {
-                        self.items[i] = self.items[self.next_empty].take();
-                    }
-                    return item;
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get(&mut self) -> Option<T> {
+    fn get(&mut self) -> Option<T> {
         if self.next_empty == 0 {
             return None;
         }
@@ -54,7 +38,7 @@ impl<T: Reset, const SIZE: usize> Pool<T, SIZE> {
             .and_then(|item| item.take())
     }
 
-    pub fn put(&mut self, mut value: T) -> bool {
+    fn put(&mut self, mut value: T) -> bool {
         self.items
             .get_mut(self.next_empty)
             .map(|item| {

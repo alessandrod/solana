@@ -22,8 +22,6 @@ dashmap = { workspace = true }
 derive-where = { workspace = true }
 derive_more = { workspace = true }
 dyn-clone = { workspace = true }
-jemalloc-sys.workspace = true
-libc.workspace = true
 log = { workspace = true }
 scopeguard = { workspace = true }
 solana-clock = { workspace = true }
