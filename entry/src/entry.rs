@@ -12,6 +12,7 @@ use {
     solana_hash::Hash,
     solana_merkle_tree::MerkleTree,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    solana_signature::Signature,
     solana_transaction::{
         versioned::VersionedTransaction, Transaction, TransactionVerificationMode,
     },
@@ -253,6 +254,52 @@ pub struct EntryVerificationState {
 pub struct EntrySigVerificationState<Tx: TransactionWithMeta> {
     verification_status: bool,
     entries: Option<Vec<EntryType<Tx>>>,
+    signature_verification_data: Option<Vec<SignatureVerificationData>>,
+}
+
+pub struct SignatureVerificationData {
+    message_bytes: Vec<u8>,
+    signer_pubkeys: Vec<[u8; 32]>,
+    signatures: Vec<Signature>,
+    num_required_signatures: usize,
+}
+
+impl SignatureVerificationData {
+    pub fn from_versioned_transaction(versioned_tx: &VersionedTransaction) -> Self {
+        let message_bytes = versioned_tx.message.serialize();
+        let num_required_signatures =
+            usize::from(versioned_tx.message.header().num_required_signatures);
+        let signer_pubkeys = versioned_tx
+            .message
+            .static_account_keys()
+            .iter()
+            .take(num_required_signatures)
+            .map(|pubkey| {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(pubkey.as_ref());
+                key
+            })
+            .collect();
+        let signatures = versioned_tx.signatures.clone();
+        Self {
+            message_bytes,
+            signer_pubkeys,
+            signatures,
+            num_required_signatures,
+        }
+    }
+
+    pub fn verify(&self) -> bool {
+        if self.signatures.len() != self.num_required_signatures
+            || self.signer_pubkeys.len() != self.num_required_signatures
+        {
+            return false;
+        }
+        self.signatures
+            .iter()
+            .zip(self.signer_pubkeys.iter())
+            .all(|(signature, pubkey)| signature.verify(pubkey, &self.message_bytes))
+    }
 }
 
 impl<Tx: TransactionWithMeta> EntrySigVerificationState<Tx> {
@@ -261,6 +308,10 @@ impl<Tx: TransactionWithMeta> EntrySigVerificationState<Tx> {
     }
     pub fn status(&self) -> bool {
         self.verification_status
+    }
+
+    pub fn signature_verification_data(&mut self) -> Option<Vec<SignatureVerificationData>> {
+        self.signature_verification_data.take()
     }
 }
 
@@ -307,7 +358,20 @@ pub fn start_verify_transactions<Tx: TransactionWithMeta + Send + Sync + 'static
         dyn Fn(VersionedTransaction, TransactionVerificationMode) -> Result<Tx> + Send + Sync,
     >,
 ) -> Result<EntrySigVerificationState<Tx>> {
-    start_verify_transactions_cpu(entries, skip_verification, thread_pool, verify)
+    start_verify_transactions_cpu(entries, skip_verification, thread_pool, verify, false)
+}
+
+pub fn start_verify_transactions_with_signature_verification_data<
+    Tx: TransactionWithMeta + Send + Sync + 'static,
+>(
+    entries: Vec<Entry>,
+    skip_verification: bool,
+    thread_pool: &ThreadPool,
+    verify: Arc<
+        dyn Fn(VersionedTransaction, TransactionVerificationMode) -> Result<Tx> + Send + Sync,
+    >,
+) -> Result<EntrySigVerificationState<Tx>> {
+    start_verify_transactions_cpu(entries, skip_verification, thread_pool, verify, true)
 }
 
 fn start_verify_transactions_cpu<Tx: TransactionWithMeta + Send + Sync + 'static>(
@@ -317,22 +381,70 @@ fn start_verify_transactions_cpu<Tx: TransactionWithMeta + Send + Sync + 'static
     verify: Arc<
         dyn Fn(VersionedTransaction, TransactionVerificationMode) -> Result<Tx> + Send + Sync,
     >,
+    collect_signature_verification_data: bool,
 ) -> Result<EntrySigVerificationState<Tx>> {
-    let verify_func = {
-        let mode = if skip_verification {
-            TransactionVerificationMode::HashOnly
-        } else {
-            TransactionVerificationMode::FullVerification
-        };
-
-        move |versioned_tx| verify(versioned_tx, mode)
+    let verification_mode = if skip_verification {
+        TransactionVerificationMode::HashOnly
+    } else {
+        TransactionVerificationMode::FullVerification
     };
-
-    let entries = verify_transactions(entries, thread_pool, Arc::new(verify_func))?;
+    let entries_with_signature_data = thread_pool.install(|| {
+        entries
+            .into_par_iter()
+            .map(|entry| {
+                if entry.transactions.is_empty() {
+                    Ok((EntryType::Tick(entry.hash), Vec::new()))
+                } else {
+                    let transactions_with_signature_data = entry
+                        .transactions
+                        .into_par_iter()
+                        .map(|versioned_tx| {
+                            let signature_verification_data = collect_signature_verification_data
+                                .then(|| {
+                                    SignatureVerificationData::from_versioned_transaction(
+                                        &versioned_tx,
+                                    )
+                                });
+                            let transaction = verify(versioned_tx, verification_mode)?;
+                            Ok((transaction, signature_verification_data))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut signature_verification_data = Vec::new();
+                    let transactions = transactions_with_signature_data
+                        .into_iter()
+                        .map(|(transaction, maybe_signature_verification_data)| {
+                            if let Some(signature_verification_data_for_tx) =
+                                maybe_signature_verification_data
+                            {
+                                signature_verification_data
+                                    .push(signature_verification_data_for_tx);
+                            }
+                            transaction
+                        })
+                        .collect();
+                    Ok((
+                        EntryType::Transactions(transactions),
+                        signature_verification_data,
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+    let mut signature_verification_data = collect_signature_verification_data.then_some(Vec::new());
+    let entries = entries_with_signature_data
+        .into_iter()
+        .map(|(entry, mut entry_signature_verification_data)| {
+            if let Some(signature_verification_data) = signature_verification_data.as_mut() {
+                signature_verification_data.append(&mut entry_signature_verification_data);
+            }
+            entry
+        })
+        .collect();
 
     Ok(EntrySigVerificationState {
         verification_status: true,
         entries: Some(entries),
+        signature_verification_data,
     })
 }
 

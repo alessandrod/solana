@@ -8,17 +8,10 @@ use {
         cluster_info_vote_listener::{
             DuplicateConfirmedSlotsReceiver, GossipVerifiedVoteHashReceiver, VoteTracker,
         },
-        cluster_slots_service::{cluster_slots::ClusterSlots, ClusterSlotsUpdateSender},
+        cluster_slots_service::{ClusterSlotsUpdateSender, cluster_slots::ClusterSlots},
         commitment_service::TowerCommitmentAggregationData,
         consensus::{
-            fork_choice::{select_vote_and_reset_forks, ForkChoice, SelectVoteAndResetForkResult},
-            heaviest_subtree_fork_choice::HeaviestSubtreeForkChoice,
-            latest_validator_votes_for_frozen_banks::LatestValidatorVotesForFrozenBanks,
-            progress_map::{ForkProgress, ProgressMap, PropagatedStats},
-            tower_storage::{SavedTower, SavedTowerVersions, TowerStorage},
-            tower_vote_state::TowerVoteState,
-            BlockhashStatus, ComputedBankState, Stake, SwitchForkDecision, Tower, TowerError,
-            VotedStakes, SWITCH_FORK_THRESHOLD,
+            BlockhashStatus, ComputedBankState, SWITCH_FORK_THRESHOLD, Stake, SwitchForkDecision, Tower, TowerError, VotedStakes, fork_choice::{ForkChoice, SelectVoteAndResetForkResult, select_vote_and_reset_forks}, heaviest_subtree_fork_choice::HeaviestSubtreeForkChoice, latest_validator_votes_for_frozen_banks::LatestValidatorVotesForFrozenBanks, progress_map::{ForkProgress, ProgressMap, PropagatedStats}, tower_storage::{SavedTower, SavedTowerVersions, TowerStorage}, tower_vote_state::TowerVoteState
         },
         cost_update_service::CostUpdate,
         repair::{
@@ -32,29 +25,17 @@ use {
         unfrozen_gossip_verified_vote_hashes::UnfrozenGossipVerifiedVoteHashes,
         voting_service::VoteOp,
         window_service::DuplicateSlotReceiver,
-    },
-    agave_votor::{
+    }, agave_perf_trace::flush_svm_transactions, agave_votor::{
         event::{CompletedBlock, VotorEvent, VotorEventSender},
         root_utils,
         vote_history_storage::SavedVoteHistory,
         voting_service::BLSOp,
         voting_utils::{self, GenerateVoteTxResult},
-    },
-    agave_votor_messages::{
+    }, agave_votor_messages::{
         consensus_message::ConsensusMessage,
-        migration::{MigrationStatus, GENESIS_VOTE_REFRESH},
+        migration::{GENESIS_VOTE_REFRESH, MigrationStatus},
         vote::Vote,
-    },
-    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
-    rayon::{prelude::*, ThreadPool},
-    solana_accounts_db::contains::Contains,
-    solana_clock::{BankId, Slot, NUM_CONSECUTIVE_LEADER_SLOTS},
-    solana_geyser_plugin_manager::block_metadata_notifier_interface::BlockMetadataNotifierArc,
-    solana_gossip::cluster_info::ClusterInfo,
-    solana_hash::Hash,
-    solana_keypair::Keypair,
-    solana_leader_schedule::SlotLeader,
-    solana_ledger::{
+    }, crossbeam_channel::{Receiver, RecvTimeoutError, Sender}, rayon::{ThreadPool, prelude::*}, solana_accounts_db::contains::Contains, solana_clock::{BankId, NUM_CONSECUTIVE_LEADER_SLOTS, Slot}, solana_geyser_plugin_manager::block_metadata_notifier_interface::BlockMetadataNotifierArc, solana_gossip::cluster_info::ClusterInfo, solana_hash::Hash, solana_keypair::Keypair, solana_leader_schedule::SlotLeader, solana_ledger::{
         block_error::BlockError,
         blockstore::Blockstore,
         blockstore_processor::{
@@ -63,23 +44,17 @@ use {
         },
         entry_notifier_service::EntryNotifierSender,
         leader_schedule_cache::LeaderScheduleCache,
-    },
-    solana_measure::measure::Measure,
-    solana_poh::{
+    }, solana_measure::measure::Measure, solana_poh::{
         poh_controller::PohController,
         poh_recorder::{
-            PohLeaderStatus, PohRecorder, SharedLeaderState, GRACE_TICKS_FACTOR, MAX_GRACE_SLOTS,
+            GRACE_TICKS_FACTOR, MAX_GRACE_SLOTS, PohLeaderStatus, PohRecorder, SharedLeaderState
         },
-    },
-    solana_pubkey::Pubkey,
-    solana_rpc::{
+    }, solana_pubkey::Pubkey, solana_rpc::{
         optimistically_confirmed_bank_tracker::{BankNotification, BankNotificationSenderConfig},
         rpc_subscriptions::RpcSubscriptions,
         slot_status_notifier::SlotStatusNotifier,
-    },
-    solana_rpc_client_api::response::SlotUpdate,
-    solana_runtime::{
-        bank::{bank_hash_details, Bank, NewBankOptions},
+    }, solana_rpc_client_api::response::SlotUpdate, solana_runtime::{
+        bank::{Bank, NewBankOptions, bank_hash_details},
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
         installed_scheduler_pool::BankWithScheduler,
@@ -87,24 +62,16 @@ use {
         prioritization_fee_cache::PrioritizationFeeCache,
         snapshot_controller::SnapshotController,
         vote_sender_types::ReplayVoteSender,
-    },
-    solana_signer::Signer,
-    solana_svm_timings::ExecuteTimings,
-    solana_time_utils::timestamp,
-    solana_transaction::Transaction,
-    solana_vote::vote_transaction::VoteTransaction,
-    solana_vote_program::vote_state::MAX_LOCKOUT_HISTORY,
-    std::{
+    }, solana_signer::Signer, solana_svm_timings::ExecuteTimings, solana_time_utils::timestamp, solana_transaction::Transaction, solana_vote::vote_transaction::VoteTransaction, solana_vote_program::vote_state::MAX_LOCKOUT_HISTORY, std::{
         collections::{HashMap, HashSet},
         num::{NonZeroUsize, Saturating},
         result,
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
-            Arc, RwLock,
+            Arc, RwLock, atomic::{AtomicBool, AtomicU64, Ordering}
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
-    },
+    }
 };
 
 pub const MAX_ENTRY_RECV_PER_ITER: usize = 512;
