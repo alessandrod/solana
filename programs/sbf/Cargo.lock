@@ -9419,6 +9419,7 @@ dependencies = [
  "num_cpus",
  "pem",
  "percentage",
+ "pin-project-lite",
  "quinn",
  "rand 0.9.4",
  "rustls",
