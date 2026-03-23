@@ -24,6 +24,7 @@ use {
         validator::{BlockProductionMethod, GeneratorConfig},
     },
     agave_votor::event::VotorEventSender,
+    agave_xdp::transmitter::XdpSender,
     crossbeam_channel::{Receiver, bounded, unbounded},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
@@ -55,7 +56,7 @@ use {
         streamer::StakedNodes,
     },
     solana_turbine::{
-        XdpSender,
+        XdpSender as TurbineXdpSender,
         broadcast_stage::{BroadcastStage, BroadcastStageType},
     },
     std::{
@@ -116,7 +117,8 @@ impl Tpu {
         entry_notification_sender: Option<EntryNotifierSender>,
         blockstore: Arc<Blockstore>,
         broadcast_type: &BroadcastStageType,
-        turbine_xdp_sender: Option<XdpSender>,
+        turbine_xdp_sender: Option<TurbineXdpSender>,
+        quic_xdp_sender: Option<XdpSender>,
         exit: Arc<AtomicBool>,
         shred_version: u16,
         vote_tracker: Arc<VoteTracker>,
@@ -213,10 +215,8 @@ impl Tpu {
         .unwrap();
 
         // Streamer for TPU
-        let transactions_quic_sockets: Vec<QuicSocket> = transactions_quic_sockets
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        let transactions_quic_sockets =
+            into_quic_sockets(transactions_quic_sockets, quic_xdp_sender.as_ref());
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_quic_t,
@@ -235,11 +235,8 @@ impl Tpu {
         .unwrap();
 
         // Streamer for TPU forward
-        let transactions_forwards_quic_sockets: Vec<QuicSocket> =
-            transactions_forwards_quic_sockets
-                .into_iter()
-                .map(Into::into)
-                .collect();
+        let transactions_forwards_quic_sockets =
+            into_quic_sockets(transactions_forwards_quic_sockets, quic_xdp_sender.as_ref());
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_forwards_quic_t,
@@ -401,4 +398,17 @@ impl Tpu {
         }
         Ok(())
     }
+}
+
+fn into_quic_sockets(
+    sockets: Vec<UdpSocket>,
+    quic_xdp_sender: Option<&XdpSender>,
+) -> Vec<QuicSocket> {
+    sockets
+        .into_iter()
+        .map(|socket| match quic_xdp_sender {
+            Some(sender) => QuicSocket::with_xdp(socket, sender.clone()),
+            None => QuicSocket::from(socket),
+        })
+        .collect()
 }
