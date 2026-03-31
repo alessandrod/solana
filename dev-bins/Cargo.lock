@@ -272,6 +272,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-perf-trace"
+version = "4.2.0-alpha.0"
+dependencies = [
+ "libc",
+ "log",
+ "slowlana-trace",
+]
+
+[[package]]
 name = "agave-precompiles"
 version = "4.3.0-alpha.1"
 dependencies = [
@@ -321,7 +330,7 @@ dependencies = [
  "libc",
  "nix",
  "rts-alloc",
- "shaq",
+ "shaq 3.0.0",
  "slotmap",
  "solana-fee",
  "solana-pubkey 4.2.0",
@@ -5625,6 +5634,16 @@ dependencies = [
 
 [[package]]
 name = "shaq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34483a45b522d9b15cc1031536718acb3f2d94f7bc09d7156a3e8d173dfdffe"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "shaq"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f70af47ac33fc236ff3d3185a60d0821622475415a6f3aa8378d50eed158913b"
@@ -5718,6 +5737,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
 dependencies = [
  "version_check",
+]
+
+[[package]]
+name = "slowlana-trace"
+version = "0.1.0"
+source = "git+https://github.com/alessandrod/slowlana-trace.git#08b42266b1fe2a13af2de88f487a6693dd95e739"
+dependencies = [
+ "libc",
+ "shaq 2.0.0",
 ]
 
 [[package]]
@@ -6467,7 +6495,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_bytes",
- "shaq",
+ "shaq 3.0.0",
  "signal-hook",
  "slab",
  "smallvec",
@@ -7152,6 +7180,7 @@ name = "solana-ledger"
 version = "4.3.0-alpha.1"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "agave-reserved-account-keys",
  "agave-snapshots",
  "agave-votor-messages",
@@ -8966,6 +8995,7 @@ name = "solana-turbine"
 version = "4.3.0-alpha.1"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "agave-votor",
  "agave-votor-messages",
  "bytes",
