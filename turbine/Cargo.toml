@@ -14,6 +14,7 @@ agave-unstable-api = []
 
 [dependencies]
 agave-feature-set = { workspace = true }
+agave-perf-trace.workspace = true
 agave-votor = { workspace = true }
 agave-votor-messages = { workspace = true }
 agave-xdp = { workspace = true }

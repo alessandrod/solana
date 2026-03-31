@@ -120,6 +120,7 @@ impl ProcessActiveBanksContext {
             replay_tx_thread_pool,
             prioritization_fee_cache: None,
             migration_status,
+            replay_trace: None,
         }
     }
 }
@@ -6138,6 +6139,7 @@ fn test_initialize_progress_and_fork_choice_with_duplicates() {
         None,
         None,
         &MigrationStatus::default(),
+        None,
     )
     .unwrap();
 
@@ -6161,6 +6163,7 @@ fn test_initialize_progress_and_fork_choice_with_duplicates() {
         None,
         &mut ExecuteTimings::default(),
         &MigrationStatus::default(),
+        None,
     )
     .unwrap();
 
