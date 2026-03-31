@@ -7994,6 +7994,7 @@ dependencies = [
  "agave-bls-cert-verify",
  "agave-feature-set",
  "agave-fs",
+ "agave-perf-trace",
  "agave-precompiles",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -8531,6 +8532,9 @@ dependencies = [
 name = "solana-svm"
 version = "4.2.0-beta.1"
 dependencies = [
+ "agave-feature-set",
+ "agave-perf-trace",
+ "agave-precompiles",
  "ahash 0.8.12",
  "log",
  "percentage",
