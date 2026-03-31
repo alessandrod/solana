@@ -187,6 +187,7 @@ agave-geyser-plugin-interface = { path = "geyser-plugin-interface", version = "=
 agave-io-uring = { path = "io-uring", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
 agave-logger = { path = "logger", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
 agave-math-utils = { path = "math-utils", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
+agave-perf-trace = { path = "perf-trace", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
 agave-precompiles = { path = "precompiles", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
 agave-random = { path = "random", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
 agave-reserved-account-keys = { path = "reserved-account-keys", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
@@ -198,6 +199,7 @@ agave-votor = { path = "votor", version = "=4.1.0-rc.1", features = ["agave-unst
 agave-votor-messages = { path = "votor-messages", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
 agave-xdp = { path = "xdp", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
 agave-xdp-ebpf = { path = "xdp-ebpf", version = "=4.1.0-rc.1", features = ["agave-unstable-api"] }
+slowlana-trace = { git = "https://github.com/alessandrod/slowlana-trace.git" }
 ahash = "0.8.12"
 anyhow = "1.0.102"
 aquamarine = "0.6.0"
