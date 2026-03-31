@@ -6566,6 +6566,16 @@ dependencies = [
 
 [[package]]
 name = "shaq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34483a45b522d9b15cc1031536718acb3f2d94f7bc09d7156a3e8d173dfdffe"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "shaq"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "409fbc30bb3899d634b1414fd42d946f1f980faf3e2cd209a564b45c189f82f8"
@@ -10054,6 +10064,7 @@ dependencies = [
  "agave-feature-set",
  "agave-fs",
  "agave-logger",
+ "agave-perf-trace",
  "agave-precompiles",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -10704,6 +10715,7 @@ name = "solana-svm"
 version = "4.4.0-alpha.3"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "agave-precompiles",
  "ahash 0.8.12",
  "assert_matches",
