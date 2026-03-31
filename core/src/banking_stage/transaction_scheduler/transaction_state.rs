@@ -20,16 +20,25 @@ pub(crate) struct TransactionState<Tx> {
     priority: u64,
     /// Estimated cost of the transaction.
     cost: u64,
+    /// Trace flow identifier assigned at packet ingress.
+    flow_id: u64,
 }
 
 impl<Tx> TransactionState<Tx> {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
-    pub(crate) fn new(transaction: Tx, max_age: MaxAge, priority: u64, cost: u64) -> Self {
+    pub(crate) fn new(
+        transaction: Tx,
+        max_age: MaxAge,
+        priority: u64,
+        cost: u64,
+        flow_id: u64,
+    ) -> Self {
         Self {
             transaction: Some(transaction),
             max_age,
             priority,
             cost,
+            flow_id,
         }
     }
 
@@ -43,6 +52,10 @@ impl<Tx> TransactionState<Tx> {
     /// Return the cost of the transaction.
     pub(crate) fn cost(&self) -> u64 {
         self.cost
+    }
+
+    pub(crate) fn flow_id(&self) -> u64 {
+        self.flow_id
     }
 
     /// Intended to be called when a transaction is scheduled. This method
@@ -112,6 +125,7 @@ mod tests {
             MaxAge::MAX,
             compute_unit_price,
             TEST_TRANSACTION_COST,
+            0,
         )
     }
 
