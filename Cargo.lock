@@ -10000,6 +10000,7 @@ dependencies = [
  "agave-feature-set",
  "agave-fs",
  "agave-logger",
+ "agave-perf-trace",
  "agave-precompiles",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -10622,6 +10623,7 @@ dependencies = [
 name = "solana-svm"
 version = "4.2.0-alpha.0"
 dependencies = [
+ "agave-perf-trace",
  "ahash 0.8.12",
  "assert_matches",
  "bincode",
