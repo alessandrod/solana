@@ -7813,6 +7813,8 @@ dependencies = [
 name = "solana-perf"
 version = "4.0.0"
 dependencies = [
+ "agave-perf-trace",
+ "agave-transaction-view",
  "ahash 0.8.12",
  "bincode",
  "bv",
@@ -9717,6 +9719,8 @@ dependencies = [
 name = "solana-streamer"
 version = "4.0.0"
 dependencies = [
+ "agave-perf-trace",
+ "agave-xdp",
  "arc-swap",
  "bytes",
  "crossbeam-channel",

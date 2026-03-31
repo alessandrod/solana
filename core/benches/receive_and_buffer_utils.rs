@@ -141,6 +141,7 @@ impl ReceiveAndBufferCreator for TransactionViewReceiveAndBuffer {
         TransactionViewReceiveAndBuffer {
             receiver,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
+            tx_trace: None,
         }
     }
 }

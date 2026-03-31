@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         cancel.clone(),
+        None,
     )?;
     info!("Server listening on {}", socket.local_addr()?);
 

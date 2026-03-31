@@ -34,11 +34,16 @@ pub const NUM_RCVMMSGS: usize = 64;
 pub struct BytesPacket {
     buffer: Bytes,
     meta: Meta,
+    flow_id: u64,
 }
 
 impl BytesPacket {
     pub fn new(buffer: Bytes, meta: Meta) -> Self {
-        Self { buffer, meta }
+        Self {
+            buffer,
+            meta,
+            flow_id: 0,
+        }
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -46,6 +51,7 @@ impl BytesPacket {
         Self {
             buffer: Bytes::new(),
             meta: Meta::default(),
+            flow_id: 0,
         }
     }
 
@@ -58,7 +64,11 @@ impl BytesPacket {
             meta.set_socket_addr(dest);
         }
 
-        Self { buffer, meta }
+        Self {
+            buffer,
+            meta,
+            flow_id: 0,
+        }
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -78,7 +88,11 @@ impl BytesPacket {
             meta.set_socket_addr(dest);
         }
 
-        Ok(Self { buffer, meta })
+        Ok(Self {
+            buffer,
+            meta,
+            flow_id: 0,
+        })
     }
 
     #[inline]
@@ -101,6 +115,16 @@ impl BytesPacket {
     #[inline]
     pub fn meta_mut(&mut self) -> &mut Meta {
         &mut self.meta
+    }
+
+    #[inline]
+    pub fn flow_id(&self) -> u64 {
+        self.flow_id
+    }
+
+    #[inline]
+    pub fn set_flow_id(&mut self, flow_id: u64) {
+        self.flow_id = flow_id;
     }
 
     pub fn deserialize_slice<T, I>(&self, index: I) -> bincode::Result<T>
@@ -312,7 +336,9 @@ pub enum PacketRef<'a> {
 
 impl PartialEq for PacketRef<'_> {
     fn eq(&self, other: &PacketRef<'_>) -> bool {
-        self.meta().eq(other.meta()) && self.data(..).eq(&other.data(..))
+        self.meta().eq(other.meta())
+            && self.flow_id() == other.flow_id()
+            && self.data(..).eq(&other.data(..))
     }
 }
 
@@ -359,6 +385,14 @@ impl<'a> PacketRef<'a> {
         }
     }
 
+    #[inline]
+    pub fn flow_id(&self) -> u64 {
+        match self {
+            Self::Packet(_) => 0,
+            Self::Bytes(packet) => packet.flow_id(),
+        }
+    }
+
     pub fn deserialize_slice<T, I>(&self, index: I) -> bincode::Result<T>
     where
         T: serde::de::DeserializeOwned,
@@ -399,7 +433,9 @@ pub enum PacketRefMut<'a> {
 
 impl<'a> PartialEq for PacketRefMut<'a> {
     fn eq(&self, other: &PacketRefMut<'a>) -> bool {
-        self.data(..).eq(&other.data(..)) && self.meta().eq(other.meta())
+        self.data(..).eq(&other.data(..))
+            && self.meta().eq(other.meta())
+            && self.flow_id() == other.flow_id()
     }
 }
 
@@ -435,10 +471,26 @@ impl PacketRefMut<'_> {
     }
 
     #[inline]
+    pub fn flow_id(&self) -> u64 {
+        match self {
+            Self::Packet(_) => 0,
+            Self::Bytes(packet) => packet.flow_id(),
+        }
+    }
+
+    #[inline]
     pub fn meta_mut(&mut self) -> &mut Meta {
         match self {
             Self::Packet(packet) => packet.meta_mut(),
             Self::Bytes(packet) => packet.meta_mut(),
+        }
+    }
+
+    #[inline]
+    pub fn set_flow_id(&mut self, flow_id: u64) {
+        match self {
+            Self::Packet(_) => {}
+            Self::Bytes(packet) => packet.set_flow_id(flow_id),
         }
     }
 

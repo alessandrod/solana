@@ -8,6 +8,7 @@ use {
         },
         streamer::StakedNodes,
     },
+    agave_perf_trace::TxProducer,
     crossbeam_channel::Sender,
     pem::Pem,
     quinn::{
@@ -606,6 +607,7 @@ impl QuicStreamerConfig {
 
 /// Generic function to spawn a tokio runtime with a QUIC server
 /// Generic over QoS implementation
+#[allow(clippy::too_many_arguments)]
 fn spawn_runtime_and_server<Q, C>(
     thread_name: &'static str,
     metrics_name: &'static str,
@@ -616,6 +618,7 @@ fn spawn_runtime_and_server<Q, C>(
     quic_server_params: QuicStreamerConfig,
     qos: Arc<Q>,
     cancel: CancellationToken,
+    tx_trace: Option<Arc<TxProducer>>,
 ) -> Result<SpawnServerResult, QuicServerError>
 where
     Q: QosController<C> + Send + Sync + 'static,
@@ -633,6 +636,7 @@ where
             quic_server_params,
             qos,
             cancel,
+            tx_trace,
         )
     }?;
     let handle = thread::Builder::new()
@@ -662,13 +666,13 @@ pub fn spawn_stake_wighted_qos_server(
     keypair: &Keypair,
     packet_sender: Sender<PacketBatch>,
     staked_nodes: Arc<RwLock<StakedNodes>>,
-    quic_server_params: QuicStreamerConfig,
-    qos_config: SwQosConfig,
+    server_params: SwQosQuicStreamerConfig,
     cancel: CancellationToken,
+    tx_trace: Option<Arc<TxProducer>>,
 ) -> Result<SpawnServerResult, QuicServerError> {
     let stats = Arc::<StreamerStats>::default();
     let swqos = Arc::new(SwQos::new(
-        qos_config,
+        server_params.qos_config,
         stats.clone(),
         staked_nodes,
         cancel.clone(),
@@ -680,9 +684,10 @@ pub fn spawn_stake_wighted_qos_server(
         sockets,
         keypair,
         packet_sender,
-        quic_server_params,
+        server_params.quic_streamer_config,
         swqos,
         cancel,
+        tx_trace,
     )
 }
 
@@ -694,13 +699,13 @@ pub fn spawn_simple_qos_server(
     keypair: &Keypair,
     packet_sender: Sender<PacketBatch>,
     staked_nodes: Arc<RwLock<StakedNodes>>,
-    quic_server_params: QuicStreamerConfig,
-    qos_config: SimpleQosConfig,
+    server_params: SimpleQosQuicStreamerConfig,
     cancel: CancellationToken,
+    tx_trace: Option<Arc<TxProducer>>,
 ) -> Result<SpawnServerResult, QuicServerError> {
     let stats = Arc::<StreamerStats>::default();
     let simple_qos = Arc::new(SimpleQos::new(
-        qos_config,
+        server_params.qos_config,
         stats.clone(),
         staked_nodes,
         cancel.clone(),
@@ -713,9 +718,10 @@ pub fn spawn_simple_qos_server(
         sockets,
         keypair,
         packet_sender,
-        quic_server_params,
+        server_params.quic_streamer_config,
         simple_qos,
         cancel,
+        tx_trace,
     )
 }
 
@@ -767,9 +773,9 @@ mod test {
             &keypair,
             sender,
             staked_nodes,
-            server_params.quic_streamer_config,
-            server_params.qos_config,
+            server_params,
             cancel.clone(),
+            None,
         )
         .unwrap();
         (t, receiver, server_address, cancel)
@@ -800,9 +806,12 @@ mod test {
             &keypair,
             sender,
             staked_nodes,
-            server_params,
-            SwQosConfig::default_for_tests(),
+            SwQosQuicStreamerConfig {
+                quic_streamer_config: server_params,
+                qos_config: SwQosConfig::default_for_tests(),
+            },
             cancel.clone(),
+            None,
         )
         .unwrap();
         (t, receiver, server_address, cancel)
@@ -856,14 +865,17 @@ mod test {
             &keypair,
             sender,
             staked_nodes,
-            QuicStreamerConfig {
-                ..QuicStreamerConfig::default_for_tests()
-            },
-            SwQosConfig {
-                max_connections_per_unstaked_peer: 2,
-                ..Default::default()
+            SwQosQuicStreamerConfig {
+                quic_streamer_config: QuicStreamerConfig {
+                    ..QuicStreamerConfig::default_for_tests()
+                },
+                qos_config: SwQosConfig {
+                    max_connections_per_unstaked_peer: 2,
+                    ..Default::default()
+                },
             },
             cancel.clone(),
+            None,
         )
         .unwrap();
 
@@ -948,14 +960,17 @@ mod test {
             &keypair,
             sender,
             staked_nodes,
-            QuicStreamerConfig {
-                ..QuicStreamerConfig::default_for_tests()
-            },
-            SwQosConfig {
-                max_unstaked_connections: 0,
-                ..Default::default()
+            SwQosQuicStreamerConfig {
+                quic_streamer_config: QuicStreamerConfig {
+                    ..QuicStreamerConfig::default_for_tests()
+                },
+                qos_config: SwQosConfig {
+                    max_unstaked_connections: 0,
+                    ..Default::default()
+                },
             },
             cancel.clone(),
+            None,
         )
         .unwrap();
 

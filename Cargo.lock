@@ -9441,7 +9441,9 @@ name = "solana-perf"
 version = "4.0.0"
 dependencies = [
  "agave-logger",
+ "agave-perf-trace",
  "agave-random",
+ "agave-transaction-view",
  "ahash 0.8.12",
  "assert_matches",
  "bencher",
@@ -10817,6 +10819,8 @@ name = "solana-streamer"
 version = "4.0.0"
 dependencies = [
  "agave-logger",
+ "agave-perf-trace",
+ "agave-xdp",
  "anyhow",
  "arc-swap",
  "assert_matches",
@@ -10866,8 +10870,8 @@ dependencies = [
 name = "solana-svm"
 version = "4.0.0"
 dependencies = [
- "agave-syscalls",
  "agave-perf-trace",
+ "agave-syscalls",
  "ahash 0.8.12",
  "assert_matches",
  "bincode",

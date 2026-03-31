@@ -9,6 +9,7 @@ use {
         quic::{QUIC_MAX_TIMEOUT, QuicServerError, QuicStreamerConfig, StreamerStats},
         streamer::StakedNodes,
     },
+    agave_perf_trace::TxProducer,
     crossbeam_channel::{Receiver, Sender, unbounded},
     quinn::{
         ClientConfig, Connection, EndpointConfig, IdleTimeout, TokioRuntime, TransportConfig,
@@ -45,6 +46,7 @@ pub fn spawn_stake_weighted_qos_server(
     quic_server_params: QuicStreamerConfig,
     qos_config: SwQosConfig,
     cancel: CancellationToken,
+    tx_trace: Option<Arc<TxProducer>>,
 ) -> Result<SpawnNonBlockingServerResult, QuicServerError>
 where
 {
@@ -66,6 +68,7 @@ where
         quic_server_params,
         swqos,
         cancel,
+        tx_trace,
     )
 }
 
@@ -142,6 +145,7 @@ pub fn setup_quic_server(
         quic_server_params,
         qos_config,
         cancel.clone(),
+        None,
     )
     .unwrap();
     SpawnTestServerResult {
