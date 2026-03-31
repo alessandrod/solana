@@ -29,10 +29,12 @@ use {
                 AncestorDuplicateSlotsReceiver, DumpedSlotsSender, PopularPrunedForksReceiver,
             },
         },
+        trace::trace_replay_slot_complete,
         unfrozen_gossip_verified_vote_hashes::UnfrozenGossipVerifiedVoteHashes,
         voting_service::VoteOp,
         window_service::DuplicateSlotReceiver,
     },
+    agave_perf_trace::EventsProducer,
     agave_votor::{
         event::{CompletedBlock, VotorEvent, VotorEventSender},
         root_utils,
@@ -221,6 +223,7 @@ struct ProcessActiveBanksContext {
     replay_tx_thread_pool: ThreadPool,
     prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
     migration_status: Arc<MigrationStatus>,
+    replay_trace: Option<EventsProducer>,
 }
 
 struct ProcessBankForksContext {
@@ -270,6 +273,7 @@ impl ProcessActiveBanksContext {
             replay_tx_thread_pool,
             prioritization_fee_cache: None,
             migration_status,
+            replay_trace: None,
         }
     }
 }
@@ -857,6 +861,13 @@ impl ReplayStage {
                 replay_tx_thread_pool,
                 prioritization_fee_cache: prioritization_fee_cache.clone(),
                 migration_status: migration_status.clone(),
+                replay_trace: match EventsProducer::join() {
+                    Ok(producer) => producer,
+                    Err(err) => {
+                        warn!("failed to initialize replay trace producer: {err}");
+                        None
+                    }
+                },
             };
             let process_bank_forks_context = ProcessBankForksContext {
                 bank_forks: bank_forks.clone(),
@@ -3785,6 +3796,16 @@ impl ReplayStage {
                     let _ = process_active_banks_context
                         .cluster_slots_update_sender
                         .send(vec![bank_slot]);
+                }
+                if let Some(replay_trace) = process_active_banks_context.replay_trace.as_ref() {
+                    trace_replay_slot_complete(
+                        Some(replay_trace),
+                        bank.slot(),
+                        r_replay_stats.started,
+                        r_replay_progress.num_shreds,
+                        r_replay_progress.num_entries,
+                        r_replay_progress.num_txs,
+                    );
                 }
 
                 if let Some(transaction_status_sender) = process_active_banks_context
@@ -10176,6 +10197,7 @@ pub(crate) mod tests {
             None,
             None,
             &MigrationStatus::default(),
+            None,
         )
         .unwrap();
 
@@ -10199,6 +10221,7 @@ pub(crate) mod tests {
             None,
             &mut ExecuteTimings::default(),
             &MigrationStatus::default(),
+            None,
         )
         .unwrap();
 
