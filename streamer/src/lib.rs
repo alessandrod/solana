@@ -9,6 +9,7 @@ pub mod quic_socket;
 pub mod recvmmsg;
 pub mod sendmmsg;
 pub mod streamer;
+mod trace;
 
 #[macro_use]
 extern crate log;

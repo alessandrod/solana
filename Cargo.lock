@@ -7799,6 +7799,7 @@ dependencies = [
  "agave-fs",
  "agave-logger",
  "agave-math-utils",
+ "agave-perf-trace",
  "agave-reserved-account-keys",
  "agave-scheduler-bindings",
  "agave-scheduling-utils",
@@ -9197,6 +9198,7 @@ name = "solana-perf"
 version = "4.2.0-alpha.0"
 dependencies = [
  "agave-logger",
+ "agave-perf-trace",
  "agave-random",
  "agave-transaction-view",
  "ahash 0.8.12",
@@ -10547,6 +10549,7 @@ name = "solana-streamer"
 version = "4.2.0-alpha.0"
 dependencies = [
  "agave-logger",
+ "agave-perf-trace",
  "agave-xdp",
  "anyhow",
  "assert_matches",
