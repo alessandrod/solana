@@ -243,12 +243,21 @@ dependencies = [
 
 [[package]]
 name = "agave-memory"
-version = "4.3.0-alpha.2"
+version = "4.3.0-beta.2"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.19",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
+]
+
+[[package]]
+name = "agave-perf-trace"
+version = "4.3.0-beta.2"
+dependencies = [
+ "libc",
+ "log",
+ "slowlana-trace",
 ]
 
 [[package]]
@@ -318,7 +327,7 @@ dependencies = [
  "libc",
  "nix",
  "rts-alloc",
- "shaq",
+ "shaq 3.0.0",
  "slotmap",
  "solana-fee",
  "solana-pubkey 4.3.0",
@@ -6798,6 +6807,16 @@ dependencies = [
 
 [[package]]
 name = "shaq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34483a45b522d9b15cc1031536718acb3f2d94f7bc09d7156a3e8d173dfdffe"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "shaq"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f70af47ac33fc236ff3d3185a60d0821622475415a6f3aa8378d50eed158913b"
@@ -6928,6 +6947,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
 dependencies = [
  "version_check",
+]
+
+[[package]]
+name = "slowlana-trace"
+version = "0.1.0"
+source = "git+https://github.com/alessandrod/slowlana-trace.git#08b42266b1fe2a13af2de88f487a6693dd95e739"
+dependencies = [
+ "libc",
+ "shaq 2.0.0",
 ]
 
 [[package]]
@@ -8091,7 +8119,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serial_test",
- "shaq",
+ "shaq 3.0.0",
  "signal-hook",
  "slab",
  "smallvec",
@@ -9074,6 +9102,7 @@ version = "4.3.0-beta.2"
 dependencies = [
  "agave-feature-set",
  "agave-logger",
+ "agave-perf-trace",
  "agave-reserved-account-keys",
  "agave-snapshots",
  "agave-votor-messages",
@@ -11570,6 +11599,7 @@ version = "4.3.0-beta.2"
 dependencies = [
  "agave-feature-set",
  "agave-logger",
+ "agave-perf-trace",
  "agave-votor",
  "agave-votor-messages",
  "assert_matches",
@@ -13462,6 +13492,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "749f0da9cc72d82e600d8d2e44cadd0b9eedb9038f71a1c58556ac1c5791813b"
 dependencies = [
  "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a3e1820f08b8513f676f7ab6c1f99ff312fb97b553d30ff4dd86f9f15728aa7"
+dependencies = [
+ "windows_aarch64_gnullvm 0.42.2",
+ "windows_aarch64_msvc 0.42.2",
+ "windows_i686_gnu 0.42.2",
+ "windows_i686_msvc 0.42.2",
+ "windows_x86_64_gnu 0.42.2",
+ "windows_x86_64_gnullvm 0.42.2",
+ "windows_x86_64_msvc 0.42.2",
 ]
 
 [[package]]
