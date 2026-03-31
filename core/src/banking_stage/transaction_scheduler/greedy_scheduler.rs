@@ -9,10 +9,14 @@ use {
         transaction_state::TransactionState,
         transaction_state_container::StateContainer,
     },
-    crate::banking_stage::{
-        consumer::{ENTRY_OVERHEAD_BYTES, TARGET_NUM_TRANSACTIONS_PER_BATCH},
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+    crate::{
+        banking_stage::{
+            consumer::{ENTRY_OVERHEAD_BYTES, TARGET_NUM_TRANSACTIONS_PER_BATCH},
+            scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+        },
+        trace::trace_transaction_state,
     },
+    agave_perf_trace::{TransactionState as TraceTransactionState, TxProducer, timestamp},
     agave_scheduling_utils::thread_aware_account_locks::{
         ThreadAwareAccountLocks, ThreadId, ThreadSet, TryLockError,
     },
@@ -61,6 +65,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         config: GreedySchedulerConfig,
+        tx_trace: Option<TxProducer>,
     ) -> Self {
         assert!(
             config.target_entry_bytes_per_batch > ENTRY_OVERHEAD_BYTES,
@@ -72,6 +77,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
                 consume_work_senders,
                 finished_consume_work_receiver,
                 config.target_transactions_per_batch,
+                tx_trace,
             ),
             config,
         }
@@ -149,6 +155,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
             // Now check if the transaction can actually be scheduled.
             match try_schedule_transaction(
                 transaction_state,
+                self.common.tx_trace.as_ref(),
                 &mut self.common.account_locks,
                 schedulable_threads,
                 |thread_set| {
@@ -244,6 +251,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
 
 fn try_schedule_transaction<Tx: TransactionWithMeta>(
     transaction_state: &mut TransactionState<Tx>,
+    tx_trace: Option<&TxProducer>,
     account_locks: &mut ThreadAwareAccountLocks,
     schedulable_threads: ThreadSet,
     thread_selector: impl Fn(ThreadSet) -> ThreadId,
@@ -277,6 +285,17 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
 
     let (transaction, max_age) = transaction_state.take_transaction_for_scheduling();
     let cost = transaction_state.cost();
+
+    trace_transaction_state(
+        tx_trace,
+        transaction_state.flow_id(),
+        *transaction
+            .as_sanitized_transaction()
+            .signature()
+            .as_array(),
+        timestamp(),
+        TraceTransactionState::Scheduled,
+    );
 
     Ok(TransactionSchedulingInfo {
         thread_id,
@@ -320,8 +339,12 @@ mod test {
         let (consume_work_senders, consume_work_receivers) =
             (0..num_threads).map(|_| bounded(1024)).unzip();
         let (finished_consume_work_sender, finished_consume_work_receiver) = bounded(1024);
-        let scheduler =
-            GreedyScheduler::new(consume_work_senders, finished_consume_work_receiver, config);
+        let scheduler = GreedyScheduler::new(
+            consume_work_senders,
+            finished_consume_work_receiver,
+            config,
+            None,
+        );
         (
             scheduler,
             consume_work_receivers,

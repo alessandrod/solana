@@ -12,8 +12,10 @@ use {
             consumer::Consumer, decision_maker::BufferedPacketsDecision, scheduler_messages::MaxAge,
         },
         transaction_priority::calculate_priority_and_cost,
+        trace::trace_transaction_state,
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
+    agave_perf_trace::{TransactionState as TraceTransactionState, TxProducer, timestamp},
     agave_transaction_view::{
         resolved_transaction_view::ResolvedTransactionView, sanitize::SanitizeConfig,
         transaction_data::TransactionData, transaction_version::TransactionVersion,
@@ -26,6 +28,7 @@ use {
     solana_address_lookup_table_interface::state::estimate_last_valid_slot,
     solana_clock::{Epoch, Slot},
     solana_message::v0::LoadedAddresses,
+    solana_perf::get_signature_from_packet,
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank,
@@ -105,6 +108,7 @@ pub(crate) struct TransactionViewReceiveAndBuffer {
     pub receiver: BankingPacketReceiver,
     pub sharable_banks: SharableBanks,
     pub filter_keys: Arc<HashSet<Pubkey>>,
+    pub tx_trace: Option<TxProducer>,
 }
 
 impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
@@ -347,6 +351,17 @@ impl TransactionViewReceiveAndBuffer {
                     continue;
                 }
 
+                if let Ok(sig) = get_signature_from_packet(&packet) {
+                    trace_transaction_state(
+                        self.tx_trace.as_ref(),
+                        packet.flow_id(),
+                        *sig,
+                        timestamp(),
+                        TraceTransactionState::Buffered,
+                    );
+                }
+
+                let flow_id = packet.flow_id();
                 // Reserve free-space to copy packet into, run sanitization checks, and insert.
                 if let Some(transaction_id) =
                     container.try_insert_map_only_with_data(packet_data, |bytes| {
@@ -357,6 +372,7 @@ impl TransactionViewReceiveAndBuffer {
                             transaction_account_lock_limit,
                             &sanitize_config,
                             &self.filter_keys,
+                            flow_id,
                         ) {
                             Ok(state) => Ok(state),
                             Err(
@@ -423,6 +439,7 @@ impl TransactionViewReceiveAndBuffer {
         transaction_account_lock_limit: usize,
         sanitize_config: &SanitizeConfig,
         filter_keys: &HashSet<Pubkey>,
+        flow_id: u64,
     ) -> Result<TransactionViewState, PacketHandlingError> {
         let (view, deactivation_slot) = translate_to_runtime_view(
             bytes,
@@ -450,7 +467,9 @@ impl TransactionViewReceiveAndBuffer {
         let (priority, cost) =
             calculate_priority_and_cost(working_bank, &view, &transaction_configuration);
 
-        Ok(TransactionState::new(view, max_age, priority, cost))
+        Ok(TransactionState::new(
+            view, max_age, priority, cost, flow_id,
+        ))
     }
 }
 
@@ -609,6 +628,7 @@ mod tests {
             receiver,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
             filter_keys,
+            tx_trace: None,
         };
         let container = TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
         (receive_and_buffer, container)
