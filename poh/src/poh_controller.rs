@@ -1,4 +1,6 @@
 use {
+    crate::trace::trace_poh_slot,
+    agave_perf_trace::{EventsProducer, PohSlotTag},
     crossbeam_channel::{Receiver, SendError, Sender, TryRecvError},
     solana_clock::Slot,
     solana_runtime::{bank::Bank, installed_scheduler_pool::BankWithScheduler},
@@ -27,6 +29,7 @@ pub struct PohController {
     /// channel.
     pending_message: Arc<AtomicUsize>,
     last_bank: Option<BankWithScheduler>,
+    trace: Option<EventsProducer>,
 }
 
 impl PohController {
@@ -43,6 +46,13 @@ impl PohController {
                 sender,
                 pending_message,
                 last_bank: None,
+                trace: match EventsProducer::join() {
+                    Ok(producer) => producer,
+                    Err(err) => {
+                        log::warn!("failed to initialize poh controller trace producer: {err}");
+                        None
+                    }
+                },
             },
             receiver,
         )
@@ -105,6 +115,23 @@ impl PohController {
         &mut self,
         message: PohServiceMessage,
     ) -> Result<(), SendError<PohServiceMessage>> {
+        match &message {
+            PohServiceMessage::SetBank { bank } => {
+                trace_poh_slot(
+                    self.trace.as_ref(),
+                    bank.slot(),
+                    PohSlotTag::ControllerSetBank,
+                );
+            }
+            PohServiceMessage::Reset { reset_bank, .. } => {
+                trace_poh_slot(
+                    self.trace.as_ref(),
+                    reset_bank.slot(),
+                    PohSlotTag::ControllerReset,
+                );
+            }
+        }
+
         let cleared_bank = match &message {
             PohServiceMessage::SetBank { bank } => {
                 if bank.has_installed_active_bp_scheduler() {
