@@ -19,6 +19,7 @@ use {
         validator::BlockProductionMethod,
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
+    agave_perf_trace::{EventsProducer, TxProducer},
     crossbeam_channel::{Receiver, Sender, unbounded},
     futures::{StreamExt, stream::FuturesUnordered},
     histogram::Histogram,
@@ -504,10 +505,32 @@ impl BankingStage {
 
         // Setup receive & buffer.
         let sharable_banks = self.bank_forks.read().unwrap().sharable_banks();
+        let receive_and_buffer_tx_trace = match TxProducer::join() {
+            Ok(producer) => producer,
+            Err(err) => {
+                warn!("failed to initialize buffered transaction trace producer: {err}");
+                None
+            }
+        };
+        let scheduler_tx_trace = match TxProducer::join() {
+            Ok(producer) => producer,
+            Err(err) => {
+                warn!("failed to initialize scheduler transaction trace producer: {err}");
+                None
+            }
+        };
+        let scheduler_events_trace = match EventsProducer::join() {
+            Ok(producer) => producer,
+            Err(err) => {
+                warn!("failed to initialize scheduler event trace producer: {err}");
+                None
+            }
+        };
         let receive_and_buffer = TransactionViewReceiveAndBuffer {
             receiver: self.non_vote_receiver.clone(),
             sharable_banks: sharable_banks.clone(),
             filter_keys: self.filter_keys.clone(),
+            tx_trace: receive_and_buffer_tx_trace,
         };
 
         // Spawn vote worker.
@@ -555,6 +578,7 @@ impl BankingStage {
             work_senders,
             finished_work_receiver,
             GreedySchedulerConfig::default(),
+            scheduler_tx_trace,
         );
         let exit = exit.clone();
         let shutdown_signal = self.banking_shutdown_signal.clone();
@@ -570,6 +594,7 @@ impl BankingStage {
                         sharable_banks,
                         scheduler,
                         worker_metrics,
+                        scheduler_events_trace,
                     );
 
                     match scheduler_controller.run() {

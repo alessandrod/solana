@@ -20,6 +20,7 @@ use {
         },
         validator::SchedulerPacing,
     },
+    agave_perf_trace::EventsProducer,
     solana_clock::DEFAULT_MS_PER_SLOT,
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
@@ -84,6 +85,7 @@ where
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
     /// Detailed scheduling metrics.
     scheduling_details: SchedulingDetails,
+    events_trace: Option<EventsProducer>,
     /// Cursor for incremental recheck sweep of the priority queue.
     recheck_cursor: Option<TransactionPriorityId>,
     /// Recheck IDs scratch space.
@@ -103,6 +105,7 @@ where
         sharable_banks: SharableBanks,
         scheduler: S,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
+        events_trace: Option<EventsProducer>,
     ) -> Self {
         Self {
             exit,
@@ -116,6 +119,7 @@ where
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
             scheduling_details: SchedulingDetails::default(),
+            events_trace,
             recheck_cursor: None,
             recheck_chunk: Vec::with_capacity(CHECK_CHUNK),
         }
@@ -212,7 +216,8 @@ where
             self.worker_metrics
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
-            self.scheduling_details.maybe_report();
+            self.scheduling_details
+                .maybe_report(self.events_trace.as_ref());
         }
 
         Ok(())
@@ -494,6 +499,7 @@ mod tests {
             receiver,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
             filter_keys: Arc::default(),
+            tx_trace: None,
         }
     }
 
@@ -538,6 +544,7 @@ mod tests {
             consume_work_senders,
             finished_consume_work_receiver,
             GreedySchedulerConfig::default(),
+            None,
         );
         let exit = Arc::new(AtomicBool::new(false));
         let scheduler_controller = SchedulerController::new(
@@ -548,6 +555,7 @@ mod tests {
             bank_forks.read().unwrap().sharable_banks(),
             scheduler,
             vec![], // no actual workers with metrics to report, this can be empty
+            None,
         );
 
         (test_frame, scheduler_controller)

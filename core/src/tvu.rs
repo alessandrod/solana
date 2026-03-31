@@ -71,7 +71,10 @@ use {
     solana_streamer::{
         evicting_sender::EvictingSender,
         nonblocking::simple_qos::SimpleQosConfig,
-        quic::{QuicStreamerConfig, SpawnServerResult, spawn_simple_qos_server},
+        quic::{
+            QuicStreamerConfig, SimpleQosQuicStreamerConfig, SpawnServerResult,
+            spawn_simple_qos_server,
+        },
         streamer::StakedNodes,
     },
     solana_turbine::{XdpSender, retransmit_stage::RetransmitStage},
@@ -304,9 +307,12 @@ impl Tvu {
                     &cluster_info.keypair(),
                     bls_packet_sender,
                     staked_nodes,
-                    quic_server_params,
-                    qos_config,
+                    SimpleQosQuicStreamerConfig {
+                        quic_streamer_config: quic_server_params,
+                        qos_config,
+                    },
                     cancel,
+                    None,
                 )
                 .unwrap()
             };
