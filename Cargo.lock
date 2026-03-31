@@ -9282,6 +9282,7 @@ name = "solana-poh"
 version = "4.2.0-alpha.0"
 dependencies = [
  "agave-logger",
+ "agave-perf-trace",
  "agave-votor-messages",
  "arc-swap",
  "assert_matches",
