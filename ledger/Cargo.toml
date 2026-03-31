@@ -30,6 +30,7 @@ agave-unstable-api = []
 shuttle-test = ["dep:shuttle"]
 
 [dependencies]
+agave-perf-trace = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-reserved-account-keys = { workspace = true }
 agave-snapshots = { workspace = true }
