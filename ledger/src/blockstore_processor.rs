@@ -6,9 +6,11 @@ use {
         entry_notifier_service::{EntryNotification, EntryNotifierSender},
         leader_schedule_cache::LeaderScheduleCache,
         transaction_balances::compile_collected_balances,
+        trace::trace_replay_slot_complete,
         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
     },
     ExecuteTimingType::{NumExecuteBatches, TotalBatchesLen},
+    agave_perf_trace::EventsProducer,
     agave_votor_messages::{consensus_message::ConsensusMessage, migration::MigrationStatus},
     chrono_humanize::{Accuracy, HumanTime, Tense},
     crossbeam_channel::{Receiver, Sender},
@@ -927,6 +929,13 @@ pub(crate) fn process_blockstore_for_bank_0(
 
     info!("Processing ledger for slot 0...");
     let replay_tx_thread_pool = create_thread_pool(num_cpus::get());
+    let replay_trace = match EventsProducer::join() {
+        Ok(producer) => producer,
+        Err(err) => {
+            warn!("failed to initialize replay trace producer: {err}");
+            None
+        }
+    };
     process_bank_0(
         &bank_forks
             .read()
@@ -940,6 +949,7 @@ pub(crate) fn process_blockstore_for_bank_0(
         transaction_status_sender,
         entry_notification_sender,
         &bank_forks.read().unwrap().migration_status(),
+        replay_trace.as_ref(),
     )?;
 
     Ok(bank_forks)
@@ -1000,6 +1010,13 @@ pub fn process_blockstore_from_root(
         info!("ledger holds data through slot {highest_slot}");
     }
 
+    let replay_trace = match EventsProducer::join() {
+        Ok(producer) => producer,
+        Err(err) => {
+            warn!("failed to initialize replay trace producer: {err}");
+            None
+        }
+    };
     let mut timing = ExecuteTimings::default();
     let (num_slots_processed, num_new_roots_found) = if let Some(start_slot_meta) = blockstore
         .meta(start_slot)
@@ -1018,6 +1035,7 @@ pub fn process_blockstore_from_root(
             entry_notification_sender,
             &mut timing,
             snapshot_controller,
+            replay_trace.as_ref(),
         )?
     } else {
         // If there's no meta in the blockstore for the input `start_slot`,
@@ -1135,6 +1153,7 @@ fn confirm_full_slot(
     replay_vote_sender: Option<&ReplayVoteSender>,
     timing: &mut ExecuteTimings,
     migration_status: &MigrationStatus,
+    replay_trace: Option<&EventsProducer>,
 ) -> result::Result<(), BlockstoreProcessorError> {
     let mut confirmation_timing = ConfirmationTiming::default();
     let skip_verification = !opts.run_verification;
@@ -1167,6 +1186,16 @@ fn confirm_full_slot(
         migration_status,
     )?;
 
+    if let Some(replay_trace) = replay_trace {
+        trace_replay_slot_complete(
+            Some(replay_trace),
+            slot,
+            confirmation_timing.started,
+            progress.num_shreds,
+            progress.num_entries,
+            progress.num_txs,
+        );
+    }
     timing.accumulate(&confirmation_timing.batch_execute.totals);
 
     if !bank.is_complete() {
@@ -2089,6 +2118,7 @@ fn process_bank_0(
     transaction_status_sender: Option<&TransactionStatusSender>,
     entry_notification_sender: Option<&EntryNotifierSender>,
     migration_status: &MigrationStatus,
+    replay_trace: Option<&EventsProducer>,
 ) -> result::Result<(), BlockstoreProcessorError> {
     assert_eq!(bank0.slot(), 0);
     let mut progress = ConfirmationProgress::new(bank0.last_blockhash());
@@ -2104,6 +2134,7 @@ fn process_bank_0(
         None,
         &mut ExecuteTimings::default(),
         migration_status,
+        replay_trace,
     )
     .map_err(|err| match err {
         err @ BlockstoreProcessorError::InvalidTransaction(_) => panic!("{err}"),
@@ -2313,6 +2344,7 @@ fn load_frozen_forks(
     entry_notification_sender: Option<&EntryNotifierSender>,
     timing: &mut ExecuteTimings,
     snapshot_controller: Option<&SnapshotController>,
+    replay_trace: Option<&EventsProducer>,
 ) -> result::Result<(u64, usize), BlockstoreProcessorError> {
     let migration_status = bank_forks.read().unwrap().migration_status();
     let blockstore_max_root = blockstore.max_root();
@@ -2411,6 +2443,7 @@ fn load_frozen_forks(
                 None,
                 timing,
                 &migration_status,
+                replay_trace,
             ) {
                 assert!(bank_forks.write().unwrap().remove(bank.slot()).is_some());
                 if opts.abort_on_invalid_block {
@@ -2716,6 +2749,7 @@ pub fn process_single_slot(
     replay_vote_sender: Option<&ReplayVoteSender>,
     timing: &mut ExecuteTimings,
     migration_status: &MigrationStatus,
+    replay_trace: Option<&EventsProducer>,
 ) -> result::Result<(), BlockstoreProcessorError> {
     let slot = bank.slot();
     if !opts.skip_inter_slot_verification {
@@ -2750,6 +2784,7 @@ pub fn process_single_slot(
         replay_vote_sender,
         timing,
         migration_status,
+        replay_trace,
     )
     .map_err(|err| {
         warn!("slot {slot} failed to verify: {err}");

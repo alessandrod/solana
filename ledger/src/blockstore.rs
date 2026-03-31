@@ -24,8 +24,10 @@ use {
             merkle_tree::{MerkleTree, SIZE_OF_MERKLE_PROOF_ENTRY, get_proof_size},
         },
         slot_stats::{ShredSource, SlotsStats},
+        trace::trace_turbine_slot_complete,
         transaction_address_lookup_table_scanner::scan_transaction,
     },
+    agave_perf_trace::EventsProducer,
     agave_snapshots::unpack_genesis_archive,
     agave_votor_messages::migration::MigrationStatus,
     assert_matches::{assert_matches, debug_assert_matches},
@@ -332,6 +334,7 @@ pub struct Blockstore {
     // to enable manual Blockstore purge requests to be issued
     pub(crate) manual_purge_request_sender: Mutex<Option<Sender<Slot>>>,
     pub slots_stats: SlotsStats,
+    events_trace: Option<EventsProducer>,
 }
 
 pub struct IndexMetaWorkingSetEntry {
@@ -629,6 +632,13 @@ impl Blockstore {
             .map(|(slot, _)| slot)
             .unwrap_or(0);
         let max_root = AtomicU64::new(max_root);
+        let events_trace = match EventsProducer::create() {
+            Ok(producer) => producer,
+            Err(err) => {
+                warn!("failed to initialize blockstore trace producer: {err}");
+                None
+            }
+        };
 
         measure.stop();
         info!("Opening blockstore done; {measure}");
@@ -671,6 +681,7 @@ impl Blockstore {
             lowest_cleanup_slot: RwLock::<Slot>::default(),
             manual_purge_request_sender: Mutex::default(),
             slots_stats: SlotsStats::default(),
+            events_trace,
         };
 
         Ok(blockstore)
@@ -5988,8 +5999,16 @@ impl Blockstore {
             assert!(slot_meta_entry.did_insert_occur);
             let meta: &SlotMeta = &RefCell::borrow(&*slot_meta_entry.new_slot_meta);
             let meta_backup = &slot_meta_entry.old_slot_meta;
-            if !completed_slots_senders.is_empty() && is_newly_completed_slot(meta, meta_backup) {
-                newly_completed_slots.push(slot);
+            let newly_completed = is_newly_completed_slot(meta, meta_backup);
+            if newly_completed {
+                trace_turbine_slot_complete(
+                    self.events_trace.as_ref(),
+                    meta.slot,
+                    meta.first_shred_timestamp,
+                );
+                if !completed_slots_senders.is_empty() {
+                    newly_completed_slots.push(slot);
+                }
             }
             // Check if the working copy of the metadata has changed
             if Some(meta) != meta_backup.as_ref() {
