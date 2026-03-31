@@ -7844,6 +7844,7 @@ dependencies = [
 name = "solana-poh"
 version = "4.0.0"
 dependencies = [
+ "agave-perf-trace",
  "agave-votor-messages",
  "arc-swap",
  "core_affinity",
