@@ -7521,6 +7521,7 @@ name = "solana-poh"
 version = "4.2.0-beta.1"
 dependencies = [
  "agave-cpu-utils",
+ "agave-perf-trace",
  "agave-votor-messages",
  "arc-swap",
  "crossbeam-channel",
