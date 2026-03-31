@@ -38,6 +38,7 @@ shuttle-test = [
 svm-internal = ["dep:qualifier_attr"]
 
 [dependencies]
+agave-perf-trace = { workspace = true }
 ahash = { workspace = true }
 log = { workspace = true }
 percentage = { workspace = true }

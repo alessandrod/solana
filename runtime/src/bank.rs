@@ -71,6 +71,7 @@ use {
     accounts_lt_hash::{CacheValue as AccountsLtHashCacheValue, Stats as AccountsLtHashStats},
     agave_bls_cert_verify::cert_verify::{self, Error as CertVerifyError},
     agave_feature_set::{self as feature_set, FeatureSet},
+    agave_perf_trace::SvmProducer,
     agave_precompiles::{get_precompile, get_precompiles, is_precompile},
     agave_reserved_account_keys::ReservedAccountKeys,
     agave_snapshots::snapshot_hash::SnapshotHash,
@@ -1164,6 +1165,14 @@ impl Bank {
 
         bank.transaction_processor =
             TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch);
+        bank.transaction_processor
+            .set_svm_trace(match SvmProducer::create() {
+                Ok(producer) => producer.map(Arc::new),
+                Err(err) => {
+                    warn!("failed to create svm trace producer: {err}");
+                    None
+                }
+            });
 
         bank.accounts_data_size_initial = bank.calculate_accounts_data_size().unwrap();
 
@@ -5535,6 +5544,14 @@ impl Bank {
     {
         self.transaction_processor =
             TransactionBatchProcessor::new_uninitialized(self.slot, self.epoch);
+        self.transaction_processor
+            .set_svm_trace(match SvmProducer::create() {
+                Ok(producer) => producer.map(Arc::new),
+                Err(err) => {
+                    warn!("failed to create svm trace producer: {err}");
+                    None
+                }
+            });
         if let Some(compute_budget) = &self.compute_budget {
             self.transaction_processor
                 .set_execution_cost(compute_budget.to_cost());

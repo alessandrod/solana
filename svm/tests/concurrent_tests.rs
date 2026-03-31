@@ -5,7 +5,7 @@ use {
     assert_matches::assert_matches,
     mock_bank::MockBankCallback,
     shuttle::{
-        Runner,
+        Config, Runner,
         sync::{Arc, RwLock},
         thread,
     },
@@ -39,14 +39,14 @@ mod mock_bank;
 const MAX_ITERATIONS: usize = 10_000;
 
 fn program_cache_execution(threads: usize) {
-    let mut mock_bank = MockBankCallback::default();
+    let mock_bank = MockBankCallback::default();
     let fork_graph = Arc::new(RwLock::new(MockForkGraph {}));
     let batch_processor = TransactionBatchProcessor::new(5, 5, Arc::downgrade(&fork_graph), None);
 
-    let programs = vec![
-        deploy_program("hello-solana".to_string(), 0, &mut mock_bank),
-        deploy_program("simple-transfer".to_string(), 0, &mut mock_bank),
-        deploy_program("clock-sysvar".to_string(), 0, &mut mock_bank),
+    let programs = [
+        deploy_program("hello-solana".to_string(), 0, &mock_bank),
+        deploy_program("simple-transfer".to_string(), 0, &mock_bank),
+        deploy_program("clock-sysvar".to_string(), 0, &mock_bank),
     ];
 
     let account_maps: HashMap<Pubkey, Slot> = programs.iter().map(|key| (*key, 0)).collect();
@@ -131,7 +131,7 @@ fn test_program_cache_with_exhaustive_scheduler() {
     // Since this is not the case for the execution of jitted program, we can still run the test
     // but with decreased accuracy.
     let scheduler = shuttle::scheduler::DfsScheduler::new(Some(MAX_ITERATIONS), true);
-    let runner = Runner::new(scheduler, Default::default());
+    let runner = Runner::new(scheduler, Config::default());
     runner.run(move || program_cache_execution(4));
 }
 
