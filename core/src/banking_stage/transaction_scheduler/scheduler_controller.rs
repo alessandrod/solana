@@ -21,7 +21,8 @@ use {
         validator::SchedulerPacing,
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
-    solana_clock::DEFAULT_MS_PER_SLOT,
+    agave_perf_trace::EventsProducer,
+    solana_clock::{DEFAULT_MS_PER_SLOT, Slot},
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
     solana_runtime::bank_forks::SharableBanks,
@@ -142,6 +143,7 @@ where
     worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
     /// Detailed scheduling metrics.
     scheduling_details: SchedulingDetails,
+    events_trace: Option<EventsProducer>,
     /// Cursor for incremental recheck sweep of the priority queue.
     recheck_cursor: Option<TransactionPriorityId>,
     /// Recheck IDs scratch space.
@@ -164,6 +166,7 @@ where
         scheduler: S,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         priority_floor: Arc<SchedulerPriorityFloor>,
+        events_trace: Option<EventsProducer>,
     ) -> Self {
         priority_floor.clear();
         let container_capacity = TOTAL_BUFFERED_PACKETS;
@@ -180,6 +183,7 @@ where
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
             scheduling_details: SchedulingDetails::default(),
+            events_trace,
             recheck_cursor: None,
             recheck_chunk: Vec::with_capacity(CHECK_CHUNK),
             saturation_state,
@@ -286,7 +290,8 @@ where
             self.worker_metrics
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
-            self.scheduling_details.maybe_report();
+            self.scheduling_details
+                .maybe_report(self.events_trace.as_ref());
         }
 
         Ok(())
@@ -615,7 +620,12 @@ mod tests {
             bank_forks.read().unwrap().sharable_banks(),
             Arc::default(),
         );
-        TransactionViewReceiveAndBuffer::new(receiver, check_work_sender, check_result_receiver)
+        TransactionViewReceiveAndBuffer::new(
+            receiver,
+            check_work_sender,
+            check_result_receiver,
+            None,
+        )
     }
 
     #[allow(clippy::type_complexity)]
@@ -659,6 +669,7 @@ mod tests {
             consume_work_senders,
             finished_consume_work_receiver,
             GreedySchedulerConfig::default(),
+            None,
         );
         let exit = Arc::new(AtomicBool::new(false));
         let scheduler_controller = SchedulerController::new(
@@ -670,6 +681,7 @@ mod tests {
             scheduler,
             vec![], // no actual workers with metrics to report, this can be empty
             Arc::new(SchedulerPriorityFloor::default()),
+            None,
         );
 
         (test_frame, scheduler_controller)
