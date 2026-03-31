@@ -282,8 +282,13 @@ impl<Tx: StaticTransactionWithMeta> TransactionStateContainer<Tx> {
         priority: u64,
         cost: u64,
     ) -> bool {
-        let transaction_id =
-            self.insert_map_only(TransactionState::new(transaction, max_age, priority, cost));
+        let transaction_id = self.insert_map_only(TransactionState::new(
+            transaction,
+            max_age,
+            priority,
+            cost,
+            0,
+        ));
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
 
         self.push_ids_into_queue(std::iter::once(priority_id)) > 0
@@ -427,7 +432,7 @@ mod tests {
             )
             .unwrap();
 
-            TransactionState::new(view, MaxAge::MAX, priority, cost)
+            TransactionState::new(view, MaxAge::MAX, priority, cost, 0)
         };
 
         // Push 2 transactions into the queue so buffer is full.
