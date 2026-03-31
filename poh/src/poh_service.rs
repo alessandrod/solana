@@ -5,7 +5,9 @@ use {
         poh_controller::{PohServiceMessage, PohServiceMessageGuard, PohServiceMessageReceiver},
         poh_recorder::{PohRecorder, Record},
         record_channels::RecordReceiver,
+        trace::trace_poh_slot,
     },
+    agave_perf_trace::{EventsProducer, PohSlotTag},
     agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::Sender,
     log::*,
@@ -108,6 +110,13 @@ impl PohService {
         record_receiver_sender: Sender<RecordReceiver>,
     ) -> Self {
         let poh_config = poh_config.clone();
+        let trace = match EventsProducer::join() {
+            Ok(producer) => producer,
+            Err(err) => {
+                warn!("failed to initialize poh service trace producer: {err}");
+                None
+            }
+        };
         let tick_producer = Builder::new()
             .name("solPohTickProd".to_string())
             .spawn(move || {
@@ -129,6 +138,7 @@ impl PohService {
                             &poh_exit,
                             &mut record_receiver,
                             poh_service_receiver,
+                            trace,
                             &migration_status.shutdown_poh,
                             ticks_per_slot,
                         )
@@ -139,6 +149,7 @@ impl PohService {
                             &poh_exit,
                             &mut record_receiver,
                             poh_service_receiver,
+                            trace,
                             ticks_per_slot,
                         )
                     }
@@ -161,6 +172,7 @@ impl PohService {
                         &mut record_receiver,
                         poh_service_receiver,
                         target_ns_per_tick,
+                        trace,
                         &migration_status.shutdown_poh,
                     )
                 }
@@ -210,6 +222,7 @@ impl PohService {
         poh_exit: &AtomicBool,
         record_receiver: &mut RecordReceiver,
         poh_service_receiver: PohServiceMessageReceiver,
+        trace: Option<EventsProducer>,
         shutdown_poh: &AtomicBool,
         ticks_per_slot: u64,
     ) {
@@ -269,7 +282,12 @@ impl PohService {
             }
 
             if let Some(service_message) = service_message {
-                Self::handle_service_message(&poh_recorder, service_message, record_receiver);
+                Self::handle_service_message(
+                    &poh_recorder,
+                    service_message,
+                    record_receiver,
+                    &trace,
+                );
                 should_shutdown_for_test_producers =
                     Self::should_shutdown_for_test_producers(&poh_recorder);
                 if should_shutdown_for_test_producers {
@@ -322,6 +340,7 @@ impl PohService {
         poh_exit: &AtomicBool,
         record_receiver: &mut RecordReceiver,
         poh_service_receiver: PohServiceMessageReceiver,
+        trace: Option<EventsProducer>,
         ticks_per_slot: u64,
     ) {
         let mut warned = false;
@@ -390,7 +409,12 @@ impl PohService {
                 warn!("exit signal is ignored because PohService is scheduled to exit soon");
             }
             if let Some(service_message) = service_message {
-                Self::handle_service_message(&poh_recorder, service_message, record_receiver);
+                Self::handle_service_message(
+                    &poh_recorder,
+                    service_message,
+                    record_receiver,
+                    &trace,
+                );
                 should_shutdown_for_test_producers =
                     Self::should_shutdown_for_test_producers(&poh_recorder);
                 if should_shutdown_for_test_producers {
@@ -537,6 +561,7 @@ impl PohService {
         record_receiver: &mut RecordReceiver,
         poh_service_receiver: PohServiceMessageReceiver,
         target_ns_per_tick: u64,
+        trace: Option<EventsProducer>,
         shutdown_poh: &AtomicBool,
     ) {
         let poh = poh_recorder.read().unwrap().poh.clone();
@@ -595,7 +620,12 @@ impl PohService {
 
             if let Some(service_message) = service_message {
                 if !should_exit {
-                    Self::handle_service_message(&poh_recorder, service_message, record_receiver);
+                    Self::handle_service_message(
+                        &poh_recorder,
+                        service_message,
+                        record_receiver,
+                        &trace,
+                    );
                 }
             }
 
@@ -624,25 +654,26 @@ impl PohService {
         poh_recorder: &RwLock<PohRecorder>,
         mut service_message: PohServiceMessageGuard,
         record_receiver: &mut RecordReceiver,
+        trace: &Option<EventsProducer>,
     ) {
-        {
-            let mut recorder = poh_recorder.write().unwrap();
-            match service_message.take() {
-                PohServiceMessage::Reset {
-                    reset_bank,
-                    next_leader_slot,
-                } => {
-                    recorder.reset(reset_bank, next_leader_slot);
-                }
-                PohServiceMessage::SetBank { bank } => {
-                    let bank_id = bank.bank_id();
-                    let bank_max_tick_height = bank.max_tick_height();
-                    recorder.set_bank(bank);
-                    let should_restart =
-                        recorder.tick_height() < bank_max_tick_height.saturating_sub(1);
-                    if should_restart {
-                        record_receiver.restart(bank_id);
-                    }
+        let mut recorder = poh_recorder.write().unwrap();
+        match service_message.take() {
+            PohServiceMessage::Reset {
+                reset_bank,
+                next_leader_slot,
+            } => {
+                trace_poh_slot(trace.as_ref(), reset_bank.slot(), PohSlotTag::ServiceReset);
+                recorder.reset(reset_bank, next_leader_slot);
+            }
+            PohServiceMessage::SetBank { bank } => {
+                trace_poh_slot(trace.as_ref(), bank.slot(), PohSlotTag::ServiceSetBank);
+                let bank_id = bank.bank_id();
+                let bank_max_tick_height = bank.max_tick_height();
+                recorder.set_bank(bank);
+                let should_restart =
+                    recorder.tick_height() < bank_max_tick_height.saturating_sub(1);
+                if should_restart {
+                    record_receiver.restart(bank_id);
                 }
             }
         }
