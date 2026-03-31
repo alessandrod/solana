@@ -169,6 +169,7 @@ impl ProcessActiveBanksContext {
             replay_mode: ForkReplayMode::Serial,
             replay_verification_worker_pool,
             migration_status,
+            replay_trace: None,
         }
     }
 }
@@ -6634,6 +6635,7 @@ fn test_initialize_progress_and_fork_choice_with_duplicates() {
         None,
         None,
         &MigrationStatus::default(),
+        None,
     )
     .unwrap();
 
@@ -6657,6 +6659,7 @@ fn test_initialize_progress_and_fork_choice_with_duplicates() {
         None,
         &mut ExecuteTimings::default(),
         &MigrationStatus::default(),
+        None,
     )
     .unwrap();
 
