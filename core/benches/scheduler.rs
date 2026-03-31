@@ -157,6 +157,7 @@ fn bench_scheduler_impl<T: ReceiveAndBuffer + utils::ReceiveAndBufferCreator>(
                                         bench_env.consume_work_senders.clone(),
                                         bench_env.finished_consume_work_receiver.clone(),
                                         GreedySchedulerConfig::default(),
+                                        None,
                                     ),
                                     iters,
                                 )
@@ -168,6 +169,7 @@ fn bench_scheduler_impl<T: ReceiveAndBuffer + utils::ReceiveAndBufferCreator>(
                                         bench_env.consume_work_senders.clone(),
                                         bench_env.finished_consume_work_receiver.clone(),
                                         PrioGraphSchedulerConfig::default(),
+                                        None,
                                     ),
                                     iters,
                                 )

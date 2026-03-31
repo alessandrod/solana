@@ -8,15 +8,19 @@ use {
         },
         scheduler_error::SchedulerError,
     },
-    crate::banking_stage::{
-        consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
-        read_write_account_set::ReadWriteAccountSet,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork},
-        transaction_scheduler::{
-            scheduler_common::select_thread, transaction_priority_id::TransactionPriorityId,
-            transaction_state::TransactionState, transaction_state_container::StateContainer,
+    crate::{
+        banking_stage::{
+            consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
+            read_write_account_set::ReadWriteAccountSet,
+            scheduler_messages::{ConsumeWork, FinishedConsumeWork},
+            transaction_scheduler::{
+                scheduler_common::select_thread, transaction_priority_id::TransactionPriorityId,
+                transaction_state::TransactionState, transaction_state_container::StateContainer,
+            },
         },
+        trace::trace_transaction_state,
     },
+    agave_perf_trace::{TransactionState as TraceTransactionState, TxProducer, timestamp},
     agave_scheduling_utils::thread_aware_account_locks::{
         ThreadAwareAccountLocks, ThreadId, ThreadSet, TryLockError,
     },
@@ -77,12 +81,14 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         config: PrioGraphSchedulerConfig,
+        tx_trace: Option<TxProducer>,
     ) -> Self {
         Self {
             common: SchedulingCommon::new(
                 consume_work_senders,
                 finished_consume_work_receiver,
                 config.target_transactions_per_batch,
+                tx_trace,
             ),
             prio_graph: PrioGraph::new(passthrough_priority),
             config,
@@ -241,6 +247,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for PrioGraphScheduler<Tx> {
                 let maybe_schedule_info = try_schedule_transaction(
                     transaction_state,
                     &pre_lock_filter,
+                    self.common.tx_trace.as_ref(),
                     &mut blocking_locks,
                     &mut self.common.account_locks,
                     num_threads,
@@ -382,6 +389,7 @@ impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
 fn try_schedule_transaction<Tx: TransactionWithMeta>(
     transaction_state: &mut TransactionState<Tx>,
     pre_lock_filter: impl Fn(&TransactionState<Tx>) -> PreLockFilterAction,
+    tx_trace: Option<&TxProducer>,
     blocking_locks: &mut ReadWriteAccountSet,
     account_locks: &mut ThreadAwareAccountLocks,
     num_threads: usize,
@@ -429,6 +437,17 @@ fn try_schedule_transaction<Tx: TransactionWithMeta>(
     let (transaction, max_age) = transaction_state.take_transaction_for_scheduling();
     let cost = transaction_state.cost();
 
+    trace_transaction_state(
+        tx_trace,
+        transaction_state.flow_id(),
+        *transaction
+            .as_sanitized_transaction()
+            .signature()
+            .as_array(),
+        timestamp(),
+        TraceTransactionState::Scheduled,
+    );
+
     Ok(TransactionSchedulingInfo {
         thread_id,
         transaction,
@@ -474,6 +493,7 @@ mod tests {
             consume_work_senders,
             finished_consume_work_receiver,
             PrioGraphSchedulerConfig::default(),
+            None,
         );
         (
             scheduler,

@@ -9,10 +9,14 @@ use {
             TransactionViewStateContainer,
         },
     },
-    crate::banking_stage::{
-        consumer::Consumer, decision_maker::BufferedPacketsDecision, scheduler_messages::MaxAge,
+    crate::{
+        banking_stage::{
+            consumer::Consumer, decision_maker::BufferedPacketsDecision, scheduler_messages::MaxAge,
+        },
+        trace::trace_transaction_state,
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
+    agave_perf_trace::{TransactionState as TraceTransactionState, TxProducer, timestamp},
     agave_transaction_view::{
         resolved_transaction_view::ResolvedTransactionView, transaction_data::TransactionData,
         transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
@@ -26,6 +30,7 @@ use {
     solana_cost_model::cost_model::CostModel,
     solana_fee_structure::FeeBudgetLimits,
     solana_message::v0::LoadedAddresses,
+    solana_perf::get_signature_from_packet,
     solana_runtime::{
         bank::Bank,
         bank_forks::{BankPair, SharableBanks},
@@ -105,6 +110,7 @@ pub(crate) trait ReceiveAndBuffer {
 pub(crate) struct TransactionViewReceiveAndBuffer {
     pub receiver: BankingPacketReceiver,
     pub sharable_banks: SharableBanks,
+    pub tx_trace: Option<TxProducer>,
 }
 
 impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
@@ -342,6 +348,17 @@ impl TransactionViewReceiveAndBuffer {
                     continue;
                 }
 
+                if let Ok(sig) = get_signature_from_packet(&packet) {
+                    trace_transaction_state(
+                        self.tx_trace.as_ref(),
+                        packet.flow_id(),
+                        *sig,
+                        timestamp(),
+                        TraceTransactionState::Buffered,
+                    );
+                }
+
+                let flow_id = packet.flow_id();
                 // Reserve free-space to copy packet into, run sanitization checks, and insert.
                 if let Some(transaction_id) =
                     container.try_insert_map_only_with_data(packet_data, |bytes| {
@@ -352,6 +369,7 @@ impl TransactionViewReceiveAndBuffer {
                             enable_static_instruction_limit,
                             transaction_account_lock_limit,
                             enable_instruction_accounts_limit,
+                            flow_id,
                         ) {
                             Ok(state) => Ok(state),
                             Err(
@@ -413,6 +431,7 @@ impl TransactionViewReceiveAndBuffer {
         enable_static_instruction_limit: bool,
         transaction_account_lock_limit: usize,
         enable_instruction_accounts_limit: bool,
+        flow_id: u64,
     ) -> Result<TransactionViewState, PacketHandlingError> {
         let (view, deactivation_slot) = translate_to_runtime_view(
             bytes,
@@ -433,7 +452,9 @@ impl TransactionViewReceiveAndBuffer {
         let fee_budget_limits = FeeBudgetLimits::from(compute_budget_limits);
         let (priority, cost) = calculate_priority_and_cost(&view, &fee_budget_limits, working_bank);
 
-        Ok(TransactionState::new(view, max_age, priority, cost))
+        Ok(TransactionState::new(
+            view, max_age, priority, cost, flow_id,
+        ))
     }
 }
 
@@ -621,6 +642,7 @@ mod tests {
         let receive_and_buffer = TransactionViewReceiveAndBuffer {
             receiver,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
+            tx_trace: None,
         };
         let container = TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
         (receive_and_buffer, container)

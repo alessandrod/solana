@@ -21,6 +21,8 @@ agave-unstable-api = []
 dev-context-only-utils = []
 
 [dependencies]
+agave-perf-trace = { workspace = true }
+agave-xdp = { workspace = true }
 arc-swap = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }

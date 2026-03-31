@@ -24,6 +24,7 @@ use {
         tpu_entry_notifier::TpuEntryNotifier,
         validator::{BlockProductionMethod, GeneratorConfig},
     },
+    agave_perf_trace::TxProducer,
     agave_votor::event::VotorEventSender,
     agave_xdp::xdp_retransmitter::XdpSender,
     crossbeam_channel::{Receiver, bounded, unbounded},
@@ -199,13 +200,20 @@ impl Tpu {
             keypair,
             vote_packet_sender,
             staked_nodes.clone(),
-            vote_quic_server_config.quic_streamer_config,
-            vote_quic_server_config.qos_config,
+            vote_quic_server_config,
             cancel.clone(),
+            None,
         )
         .unwrap();
 
         // Streamer for TPU
+        let tx_trace = match TxProducer::create() {
+            Ok(producer) => producer.map(Arc::new),
+            Err(err) => {
+                warn!("failed to initialize streamer trace producer: {err}");
+                None
+            }
+        };
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_quic_t,
@@ -217,9 +225,9 @@ impl Tpu {
             keypair,
             packet_sender,
             staked_nodes.clone(),
-            tpu_quic_server_config.quic_streamer_config,
-            tpu_quic_server_config.qos_config,
+            tpu_quic_server_config,
             cancel.clone(),
+            tx_trace,
         )
         .unwrap();
 
@@ -235,9 +243,9 @@ impl Tpu {
             keypair,
             forwarded_packet_sender,
             staked_nodes.clone(),
-            tpu_fwd_quic_server_config.quic_streamer_config,
-            tpu_fwd_quic_server_config.qos_config,
+            tpu_fwd_quic_server_config,
             cancel,
+            None,
         )
         .unwrap();
 
