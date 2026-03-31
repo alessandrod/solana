@@ -17,7 +17,9 @@ use {
                 ServeRepair, ShredRepairType,
             },
         },
+        trace::trace_repair_stats,
     },
+    agave_perf_trace::EventsProducer,
     crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender},
     lazy_lru::LruCache,
     rand::prelude::IndexedRandom as _,
@@ -423,6 +425,7 @@ struct RepairTracker {
     popular_pruned_forks_requests: HashSet<Slot>,
     // Maps a repair that may still be outstanding to the timestamp it was requested.
     outstanding_repairs: HashMap<ShredRepairType, u64>,
+    events_trace: Option<EventsProducer>,
 }
 
 pub struct RepairService {
@@ -444,6 +447,13 @@ impl RepairService {
             let blockstore = blockstore.clone();
             let exit = exit.clone();
             let repair_info = repair_info.clone();
+            let events_trace = match EventsProducer::join() {
+                Ok(producer) => producer,
+                Err(err) => {
+                    warn!("failed to initialize repair trace producer: {err}");
+                    None
+                }
+            };
             Builder::new()
                 .name("solRepairSvc".to_string())
                 .spawn(move || {
@@ -454,6 +464,7 @@ impl RepairService {
                         repair_service_channels.repair_channels,
                         repair_info,
                         &outstanding_requests,
+                        events_trace,
                     )
                 })
                 .unwrap()
@@ -618,6 +629,7 @@ impl RepairService {
         outstanding_requests: &RwLock<OutstandingShredRepairs>,
         repair_socket: &UdpSocket,
         repair_metrics: &mut RepairMetrics,
+        events_trace: Option<&EventsProducer>,
     ) {
         let mut build_repairs_batch_elapsed = Measure::start("build_repairs_batch_elapsed");
         let identity_keypair = repair_info.cluster_info.keypair();
@@ -646,6 +658,7 @@ impl RepairService {
         let mut batch_send_repairs_elapsed = Measure::start("batch_send_repairs_elapsed");
         if !batch.is_empty() {
             let num_pkts = batch.len();
+            trace_repair_stats(events_trace, num_pkts);
             let batch = batch.iter().map(|(bytes, addr)| (bytes, addr));
             match batch_send(repair_socket, batch) {
                 Ok(()) => (),
@@ -685,6 +698,7 @@ impl RepairService {
             peers_cache,
             popular_pruned_forks_requests,
             outstanding_repairs,
+            events_trace,
         } = repair_tracker;
         let root_bank = sharable_banks.root();
         // The tick rate can change, which changes the tick -> wall clock math
@@ -728,6 +742,7 @@ impl RepairService {
             outstanding_requests,
             repair_socket,
             repair_metrics,
+            events_trace.as_ref(),
         );
     }
 
@@ -738,6 +753,7 @@ impl RepairService {
         repair_channels: RepairChannels,
         repair_info: RepairInfo,
         outstanding_requests: &RwLock<OutstandingShredRepairs>,
+        events_trace: Option<EventsProducer>,
     ) {
         let (sharable_banks, migration_status) = {
             let bank_forks_r = repair_info.bank_forks.read().unwrap();
@@ -763,6 +779,7 @@ impl RepairService {
             peers_cache: LruCache::new(REPAIR_PEERS_CACHE_CAPACITY),
             popular_pruned_forks_requests: HashSet::new(),
             outstanding_repairs: HashMap::new(),
+            events_trace,
         };
 
         while !exit.load(Ordering::Relaxed) {
