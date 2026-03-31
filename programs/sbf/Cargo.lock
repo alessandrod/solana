@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "agave-perf-trace"
-version = "4.2.0-alpha.0"
+version = "4.3.0-alpha.2"
 dependencies = [
  "libc",
  "log",
@@ -8037,6 +8037,7 @@ dependencies = [
  "agave-bls-cert-verify",
  "agave-feature-set",
  "agave-fs",
+ "agave-perf-trace",
  "agave-precompiles",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -9322,6 +9323,7 @@ name = "solana-svm"
 version = "4.4.0-alpha.1"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "ahash 0.8.12",
  "bincode",
  "log",
