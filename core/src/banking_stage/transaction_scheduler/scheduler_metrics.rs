@@ -1,5 +1,7 @@
 use {
     super::scheduler::SchedulingSummary,
+    crate::trace::trace_scheduling_details,
+    agave_perf_trace::EventsProducer,
     solana_clock::Slot,
     solana_time_utils::AtomicInterval,
     std::{
@@ -440,18 +442,25 @@ impl SchedulingDetails {
         self.sum_unschedulable_threads += scheduling_summary.num_unschedulable_threads;
     }
 
-    pub fn maybe_report(&mut self) {
+    pub fn maybe_report(&mut self, events_trace: Option<&EventsProducer>) {
         const REPORT_INTERVAL: Duration = Duration::from_millis(20);
         let now = Instant::now();
         if now.duration_since(self.last_report) > REPORT_INTERVAL {
             self.last_report = now;
-            if self.num_schedule_calls > 0 {
-                let avg_starting_queue_size =
-                    self.sum_starting_queue_size / self.num_schedule_calls;
-                let avg_starting_buffer_size =
-                    self.sum_starting_buffer_size / self.num_schedule_calls;
-                datapoint_info!(
-                    "scheduling_details",
+            if let (Some(avg_starting_queue_size), Some(avg_starting_buffer_size)) = (
+                self.sum_starting_queue_size
+                    .checked_div(self.num_schedule_calls),
+                self.sum_starting_buffer_size
+                    .checked_div(self.num_schedule_calls),
+            ) {
+                trace_scheduling_details(
+                    events_trace,
+                    self.sum_unschedulable_conflicts + self.sum_unschedulable_threads,
+                    avg_starting_queue_size,
+                    avg_starting_buffer_size,
+                );
+                let datapoint = create_datapoint!(
+                    @point "scheduling_details",
                     ("num_schedule_calls", self.num_schedule_calls, i64),
                     ("min_starting_queue_size", self.min_starting_queue_size, i64),
                     ("max_starting_queue_size", self.max_starting_queue_size, i64),
@@ -479,6 +488,7 @@ impl SchedulingDetails {
                         i64
                     ),
                 );
+                solana_metrics::submit(datapoint, log::Level::Trace);
                 *self = Self {
                     last_report: now,
                     ..Self::default()

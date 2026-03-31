@@ -235,6 +235,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-perf-trace"
+version = "4.0.0-rc.1"
+dependencies = [
+ "libc",
+ "log",
+ "slowlana-trace",
+]
+
+[[package]]
 name = "agave-precompiles"
 version = "4.0.0-rc.1"
 dependencies = [
@@ -5959,6 +5968,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "slowlana-trace"
+version = "0.1.0"
+source = "git+https://github.com/alessandrod/slowlana-trace.git#361f03b837c5ba5d4c22ab7241608cc7a23816e7"
+dependencies = [
+ "libc",
+ "shaq",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6809,6 +6827,7 @@ dependencies = [
  "agave-banking-stage-ingress-types",
  "agave-feature-set",
  "agave-logger",
+ "agave-perf-trace",
  "agave-scheduler-bindings",
  "agave-scheduling-utils",
  "agave-snapshots",
@@ -7583,6 +7602,7 @@ name = "solana-ledger"
 version = "4.0.0-rc.1"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "agave-random",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -9597,6 +9617,7 @@ name = "solana-turbine"
 version = "4.0.0-rc.1"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "agave-votor",
  "agave-votor-messages",
  "agave-xdp",

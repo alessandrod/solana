@@ -29,6 +29,7 @@ frozen-abi = [
 agave-unstable-api = []
 
 [dependencies]
+agave-perf-trace = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-random = { workspace = true }
 agave-reserved-account-keys = { workspace = true }
