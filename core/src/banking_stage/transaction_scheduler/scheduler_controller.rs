@@ -21,6 +21,7 @@ use {
         },
         validator::SchedulerPacing,
     },
+    agave_perf_trace::EventsProducer,
     solana_clock::MAX_PROCESSING_AGE,
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
@@ -88,6 +89,7 @@ where
     recheck_cursor: Option<TransactionPriorityId>,
     /// Recheck IDs scratch space.
     recheck_chunk: Vec<TransactionPriorityId>,
+    events_trace: Option<EventsProducer>,
 }
 
 impl<R, S> SchedulerController<R, S>
@@ -103,6 +105,7 @@ where
         sharable_banks: SharableBanks,
         scheduler: S,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
+        events_trace: Option<EventsProducer>,
     ) -> Self {
         Self {
             exit,
@@ -118,6 +121,7 @@ where
             scheduling_details: SchedulingDetails::default(),
             recheck_cursor: None,
             recheck_chunk: Vec::with_capacity(CHECK_CHUNK),
+            events_trace,
         }
     }
 
@@ -208,7 +212,8 @@ where
             self.worker_metrics
                 .iter()
                 .for_each(|metrics| metrics.maybe_report_and_reset());
-            self.scheduling_details.maybe_report();
+            self.scheduling_details
+                .maybe_report(self.events_trace.as_ref());
         }
 
         Ok(())

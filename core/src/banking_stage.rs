@@ -23,6 +23,7 @@ use {
         validator::BlockProductionMethod,
     },
     agave_banking_stage_ingress_types::BankingPacketReceiver,
+    agave_perf_trace::EventsProducer,
     crossbeam_channel::{Receiver, Sender, unbounded},
     futures::{StreamExt, stream::FuturesUnordered},
     histogram::Histogram,
@@ -610,6 +611,16 @@ impl BankingStage {
                     Builder::new()
                         .name("solBnkTxSched".to_string())
                         .spawn(move || {
+                            let scheduler_events_trace = match EventsProducer::join() {
+                                Ok(producer) => producer,
+                                Err(err) => {
+                                    warn!(
+                                        "failed to initialize scheduler event trace producer: {err}"
+                                    );
+                                    None
+                                }
+                            };
+
                             let mut scheduler_controller = SchedulerController::new(
                                 exit,
                                 scheduler_config,
@@ -618,6 +629,7 @@ impl BankingStage {
                                 sharable_banks,
                                 $scheduler,
                                 worker_metrics,
+                                scheduler_events_trace,
                             );
 
                             match scheduler_controller.run() {

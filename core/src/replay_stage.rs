@@ -29,10 +29,12 @@ use {
                 AncestorDuplicateSlotsReceiver, DumpedSlotsSender, PopularPrunedForksReceiver,
             },
         },
+        trace::trace_replay_slot_complete,
         unfrozen_gossip_verified_vote_hashes::UnfrozenGossipVerifiedVoteHashes,
         voting_service::VoteOp,
         window_service::DuplicateSlotReceiver,
     },
+    agave_perf_trace::EventsProducer,
     agave_votor::{
         event::{CompletedBlock, VotorEvent, VotorEventSender},
         root_utils,
@@ -735,6 +737,13 @@ impl ReplayStage {
                 .thread_name(|i| format!("solReplayTx{i:02}"))
                 .build()
                 .expect("new rayon threadpool");
+            let replay_trace = match EventsProducer::join() {
+                Ok(producer) => producer,
+                Err(err) => {
+                    warn!("failed to initialize replay trace producer: {err}");
+                    None
+                }
+            };
 
             let poh_shared_leader_state = poh_recorder.read().unwrap().shared_leader_state();
             if !migration_status.is_alpenglow_enabled() {
@@ -808,6 +817,7 @@ impl ReplayStage {
                     (!migration_status.is_alpenglow_enabled()).then_some(&mut tbft_structs),
                     migration_status.as_ref(),
                     &votor_event_sender,
+                    replay_trace.as_ref(),
                 );
                 let did_complete_bank = !new_frozen_slots.is_empty();
                 if migration_status.is_alpenglow_enabled() {
@@ -845,7 +855,6 @@ impl ReplayStage {
                         &mut progress,
                     );
                 }
-
                 let forks_root = bank_forks.read().unwrap().root();
                 if !migration_status.is_alpenglow_enabled() {
                     // Process cluster-agreed versions of duplicate slots for which we potentially
@@ -3395,6 +3404,7 @@ impl ReplayStage {
         mut tbft_structs: Option<&mut TowerBFTStructures>,
         migration_status: &MigrationStatus,
         votor_event_sender: &VotorEventSender,
+        replay_trace: Option<&EventsProducer>,
     ) -> Vec<Slot> {
         // TODO: See if processing of blockstore replay results and bank completion can be made thread safe.
         let mut tx_count = 0;
@@ -3569,6 +3579,16 @@ impl ReplayStage {
                 new_frozen_slots.push(bank.slot());
                 if migration_status.should_publish_epoch_slots(bank_slot) {
                     let _ = cluster_slots_update_sender.send(vec![bank_slot]);
+                }
+                if let Some(replay_trace) = replay_trace.as_ref() {
+                    trace_replay_slot_complete(
+                        Some(replay_trace),
+                        bank.slot(),
+                        r_replay_stats.started,
+                        r_replay_progress.num_shreds,
+                        r_replay_progress.num_entries,
+                        r_replay_progress.num_txs,
+                    );
                 }
 
                 if let Some(transaction_status_sender) = transaction_status_sender {
@@ -3768,6 +3788,7 @@ impl ReplayStage {
         tbft_structs: Option<&mut TowerBFTStructures>,
         migration_status: &MigrationStatus,
         votor_event_sender: &VotorEventSender,
+        replay_trace: Option<&EventsProducer>,
     ) -> Vec<Slot> /* completed slots */ {
         let active_bank_slots = bank_forks.read().unwrap().active_bank_slots();
         let num_active_banks = active_bank_slots.len();
@@ -3844,6 +3865,7 @@ impl ReplayStage {
             tbft_structs,
             migration_status,
             votor_event_sender,
+            replay_trace,
         )
     }
 
@@ -5638,6 +5660,7 @@ pub(crate) mod tests {
             None,
             &MigrationStatus::default(),
             &votor_event_sender,
+            None,
         );
 
         assert!(progress.get(&slot).unwrap().is_dead);

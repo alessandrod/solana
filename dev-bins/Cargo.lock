@@ -233,6 +233,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-perf-trace"
+version = "4.0.0-beta.8"
+dependencies = [
+ "libc",
+ "log",
+ "slowlana-trace",
+]
+
+[[package]]
 name = "agave-precompiles"
 version = "4.0.0-beta.8"
 dependencies = [
@@ -282,7 +291,7 @@ dependencies = [
  "libc",
  "nix",
  "rts-alloc",
- "shaq",
+ "shaq 1.0.2",
  "solana-pubkey 4.1.0",
  "solana-transaction-error",
  "thiserror 2.0.18",
@@ -5861,6 +5870,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shaq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34483a45b522d9b15cc1031536718acb3f2d94f7bc09d7156a3e8d173dfdffe"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5955,6 +5974,15 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slowlana-trace"
+version = "0.1.0"
+source = "git+https://github.com/alessandrod/slowlana-trace.git#08b42266b1fe2a13af2de88f487a6693dd95e739"
+dependencies = [
+ "libc",
+ "shaq 2.0.0",
+]
 
 [[package]]
 name = "smallvec"
@@ -6807,6 +6835,7 @@ dependencies = [
  "agave-banking-stage-ingress-types",
  "agave-feature-set",
  "agave-logger",
+ "agave-perf-trace",
  "agave-scheduler-bindings",
  "agave-scheduling-utils",
  "agave-snapshots",
@@ -6849,7 +6878,7 @@ dependencies = [
  "rustls 0.23.36",
  "serde",
  "serde_bytes",
- "shaq",
+ "shaq 1.0.2",
  "signal-hook",
  "slab",
  "solana-account",
@@ -7581,6 +7610,7 @@ name = "solana-ledger"
 version = "4.0.0-beta.8"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "agave-random",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -9596,6 +9626,7 @@ name = "solana-turbine"
 version = "4.0.0-beta.8"
 dependencies = [
  "agave-feature-set",
+ "agave-perf-trace",
  "agave-votor",
  "agave-votor-messages",
  "agave-xdp",
