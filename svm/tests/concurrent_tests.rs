@@ -60,7 +60,6 @@ fn program_cache_execution(threads: usize) {
                 batch_processor.epoch,
             );
             let maps = account_maps.clone();
-            let programs = programs.clone();
             thread::spawn(move || {
                 let feature_set = SVMFeatureSet::all_enabled();
                 let account_loader = AccountLoader::new_with_loaded_accounts_capacity(

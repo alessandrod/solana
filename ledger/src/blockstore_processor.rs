@@ -4839,6 +4839,7 @@ pub mod tests {
             None,
             None,
             &MigrationStatus::default(),
+            None,
         )
         .unwrap();
         let bank0_last_blockhash = bank0.last_blockhash();
@@ -4856,6 +4857,7 @@ pub mod tests {
             None,
             &mut ExecuteTimings::default(),
             &MigrationStatus::default(),
+            None,
         )
         .unwrap();
         bank_forks.write().unwrap().set_root(1, None, None);
