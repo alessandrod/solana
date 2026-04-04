@@ -2,8 +2,10 @@ use {
     crate::{
         cluster_nodes::{ClusterNodesCache, DATA_PLANE_FANOUT, check_feature_activation},
         retransmit_stage::RetransmitStage,
+        trace::trace_shred_recv_timestamp,
     },
     agave_feature_set as feature_set,
+    agave_perf_trace::{EventsProducer, ShredKind},
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded},
     rayon::{ThreadPool, ThreadPoolBuilder, prelude::*},
     solana_gossip::cluster_info::ClusterInfo,
@@ -125,6 +127,13 @@ pub fn spawn_shred_sigverify(
 ) -> JoinHandle<()> {
     let mut stats = ShredSigVerifyStats::new(Instant::now());
     let cache = Arc::new(RwLock::new(LruCache::new(SIGVERIFY_LRU_CACHE_CAPACITY)));
+    let events_trace = Arc::new(match EventsProducer::join() {
+        Ok(producer) => producer,
+        Err(err) => {
+            log::warn!("failed to initialize shred sigverify trace producer: {err}");
+            None
+        }
+    });
     let cluster_nodes_cache = Arc::new(ClusterNodesCache::<RetransmitStage>::new(
         CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
         CLUSTER_NODES_CACHE_TTL,
@@ -190,6 +199,7 @@ pub fn spawn_shred_sigverify(
                     let verified_sender = verified_sender.clone();
                     let cluster_nodes_cache = Arc::clone(&cluster_nodes_cache);
                     let cache = Arc::clone(&cache);
+                    let events_trace = Arc::clone(&events_trace);
                     let completion_sender = completion_sender.clone();
                     thread_pool.spawn(move || {
                         process_shred_sigverify_batch(
@@ -200,6 +210,7 @@ pub fn spawn_shred_sigverify(
                             verified_sender,
                             cluster_nodes_cache,
                             cache,
+                            events_trace,
                             completion_sender,
                         );
                     });
@@ -281,6 +292,7 @@ fn process_shred_sigverify_batch(
     verified_sender: Sender<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
     cluster_nodes_cache: Arc<ClusterNodesCache<RetransmitStage>>,
     cache: Arc<RwLock<LruCache>>,
+    events_trace: Arc<Option<EventsProducer>>,
     completion_sender: Sender<BatchCompletion>,
 ) {
     let (mut stats, shreds, repairs) = job
@@ -315,6 +327,7 @@ fn process_shred_sigverify_batch(
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    events_trace.as_ref().as_ref(),
                     &mut stats,
                     &job.keypair,
                 )
@@ -446,48 +459,61 @@ fn maybe_verify_and_resign_packet(
     cluster_info: &ClusterInfo,
     leader_schedule_cache: &LeaderScheduleCache,
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
+    events_trace: Option<&EventsProducer>,
     stats: &mut BatchStatsDelta,
     keypair: &Keypair,
 ) -> Result<(), ResignError> {
     let repair = packet.meta().repair();
     let shred = get_shred(packet.as_ref()).ok_or(shred::Error::InvalidPacketSize)?;
+    let shred_id = (!repair)
+        .then(|| shred::layout::get_shred_id(shred))
+        .flatten();
     let is_signed = is_retransmitter_signed_variant(shred)?;
+    if !repair && is_signed {
+        match verify_retransmitter_signature(
+            shred,
+            root_bank,
+            working_bank,
+            cluster_info,
+            leader_schedule_cache,
+            cluster_nodes_cache,
+            stats,
+        ) {
+            Ok(_) => {}
+            Err(()) => {
+                stats.num_invalid_retransmitter += 1;
+                if shred::layout::get_slot(shred)
+                    .map(|slot| {
+                        check_feature_activation(
+                            &feature_set::verify_retransmitter_signature::id(),
+                            slot,
+                            root_bank,
+                        )
+                    })
+                    .unwrap_or_default()
+                {
+                    return Err(ResignError::VerifyRetransmitterSignature);
+                }
+            }
+        }
+    }
     if is_signed {
         // Repair packets do not follow turbine tree and
         // are verified using the trailing nonce.
-        if !repair
-            && !verify_retransmitter_signature(
-                shred,
-                root_bank,
-                working_bank,
-                cluster_info,
-                leader_schedule_cache,
-                cluster_nodes_cache,
-                stats,
-            )
-        {
-            stats.num_invalid_retransmitter += 1;
-            if shred::layout::get_slot(shred)
-                .map(|slot| {
-                    check_feature_activation(
-                        &feature_set::verify_retransmitter_signature::id(),
-                        slot,
-                        root_bank,
-                    )
-                })
-                .unwrap_or_default()
-            {
-                return Err(ResignError::VerifyRetransmitterSignature);
-            }
-        }
-
         resign_packet(packet, keypair)?;
+    }
+
+    if let Some(shred_id) = shred_id {
+        let shred_kind = match shred_id.shred_type() {
+            shred::ShredType::Data => ShredKind::Data,
+            shred::ShredType::Code => ShredKind::Code,
+        };
+        trace_shred_recv_timestamp(events_trace, shred_id.slot(), shred_id.index(), shred_kind);
     }
 
     Ok(())
 }
 
-#[must_use]
 fn verify_retransmitter_signature(
     shred: &[u8],
     root_bank: &Bank,
@@ -496,44 +522,45 @@ fn verify_retransmitter_signature(
     leader_schedule_cache: &LeaderScheduleCache,
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     stats: &mut BatchStatsDelta,
-) -> bool {
+) -> Result<Option<u8>, ()> {
     let signature = match shred::layout::get_retransmitter_signature(shred) {
         Ok(signature) => signature,
         // If the shred is not of resigned variant,
         // then there is nothing to verify.
-        Err(shred::Error::InvalidShredVariant) => return true,
-        Err(_) => return false,
+        Err(shred::Error::InvalidShredVariant) => return Ok(Some(0)),
+        Err(_) => return Err(()),
     };
     let Some(merkle_root) = shred::layout::get_merkle_root(shred) else {
-        return false;
+        return Err(());
     };
     let Some(shred) = shred::layout::get_shred_id(shred) else {
-        return false;
+        return Err(());
     };
     let Some(leader) = leader_schedule_cache.slot_leader_at(shred.slot(), Some(working_bank))
     else {
         stats.num_unknown_slot_leader += 1;
-        return false;
+        return Err(());
     };
     let cluster_nodes =
         cluster_nodes_cache.get(shred.slot(), root_bank, working_bank, cluster_info);
-    let parent = match cluster_nodes.get_retransmit_parent(&leader.id, &shred, DATA_PLANE_FANOUT) {
-        Ok(Some(parent)) => parent,
-        Ok(None) => {
-            stats.num_retranmitter_signature_skipped += 1;
-            return true;
-        }
+    let position = match cluster_nodes.get_retransmit_parent(&leader.id, &shred, DATA_PLANE_FANOUT)
+    {
+        Ok(position) => position,
         Err(err) => {
             error!("get_retransmit_parent: {err:?}");
             stats.num_unknown_turbine_parent += 1;
-            return false;
+            return Err(());
         }
+    };
+    let Some((parent, depth)) = position else {
+        stats.num_retranmitter_signature_skipped += 1;
+        return Ok(None);
     };
     if signature.verify(parent.as_ref(), merkle_root.as_ref()) {
         stats.num_retranmitter_signature_verified += 1;
-        true
+        Ok(Some(depth))
     } else {
-        false
+        Err(())
     }
 }
 
@@ -838,6 +865,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &mut stats,
                     &keypair,
                 )
@@ -859,6 +887,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &mut stats,
                     &keypair,
                 )
@@ -880,6 +909,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &mut stats,
                     &keypair,
                 )
@@ -898,6 +928,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &mut stats,
                     &keypair,
                 )

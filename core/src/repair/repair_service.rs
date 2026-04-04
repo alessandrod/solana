@@ -626,17 +626,21 @@ impl RepairService {
     }
 
     fn build_and_send_repair_batch(
-        serve_repair: &mut ServeRepair,
-        peers_cache: &mut LruCache<u64, RepairPeers>,
+        repair_tracker: &mut RepairTracker,
         repair_request_quic_sender: &AsyncSender<(SocketAddr, Bytes)>,
         repairs: Vec<ShredRepairType>,
         repair_info: &RepairInfo,
         outstanding_requests: &RwLock<OutstandingShredRepairs>,
         repair_socket: &UdpSocket,
         repair_protocol: Protocol,
-        repair_metrics: &mut RepairMetrics,
-        events_trace: Option<&EventsProducer>,
     ) {
+        let RepairTracker {
+            serve_repair,
+            repair_metrics,
+            peers_cache,
+            events_trace,
+            ..
+        } = repair_tracker;
         let mut build_repairs_batch_elapsed = Measure::start("build_repairs_batch_elapsed");
         let identity_keypair = repair_info.cluster_info.keypair();
         let batch: Vec<(Vec<u8>, SocketAddr)> = {
@@ -666,7 +670,7 @@ impl RepairService {
         let mut batch_send_repairs_elapsed = Measure::start("batch_send_repairs_elapsed");
         if !batch.is_empty() {
             let num_pkts = batch.len();
-            trace_repair_stats(events_trace, num_pkts);
+            trace_repair_stats(events_trace.as_ref(), num_pkts);
             let batch = batch.iter().map(|(bytes, addr)| (bytes, addr));
             match batch_send(repair_socket, batch) {
                 Ok(()) => (),
@@ -699,56 +703,43 @@ impl RepairService {
             dumped_slots_receiver,
             popular_pruned_forks_sender,
         } = repair_channels;
-        let RepairTracker {
-            sharable_banks,
-            repair_weight,
-            serve_repair,
-            repair_metrics,
-            peers_cache,
-            popular_pruned_forks_requests,
-            outstanding_repairs,
-            events_trace,
-        } = repair_tracker;
-        let root_bank = sharable_banks.root();
+        let root_bank = repair_tracker.sharable_banks.root();
 
         Self::update_weighting_heuristic(
             blockstore,
             root_bank.clone(),
-            repair_weight,
-            popular_pruned_forks_requests,
+            &mut repair_tracker.repair_weight,
+            &mut repair_tracker.popular_pruned_forks_requests,
             dumped_slots_receiver,
             verified_voter_slots_receiver,
-            repair_metrics,
+            &mut repair_tracker.repair_metrics,
         );
 
         let repairs = Self::identify_repairs(
             blockstore,
             root_bank.clone(),
             repair_info,
-            repair_weight,
-            outstanding_repairs,
-            repair_metrics,
+            &mut repair_tracker.repair_weight,
+            &mut repair_tracker.outstanding_repairs,
+            &mut repair_tracker.repair_metrics,
         );
 
         Self::handle_popular_pruned_forks(
             root_bank.clone(),
-            repair_weight,
-            popular_pruned_forks_requests,
+            &mut repair_tracker.repair_weight,
+            &mut repair_tracker.popular_pruned_forks_requests,
             popular_pruned_forks_sender,
-            repair_metrics,
+            &mut repair_tracker.repair_metrics,
         );
 
         Self::build_and_send_repair_batch(
-            serve_repair,
-            peers_cache,
+            repair_tracker,
             repair_request_quic_sender,
             repairs,
             repair_info,
             outstanding_requests,
             repair_socket,
             serve_repair::get_repair_protocol(root_bank.cluster_type()),
-            repair_metrics,
-            events_trace.as_ref(),
         );
     }
 

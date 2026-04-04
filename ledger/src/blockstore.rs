@@ -21,11 +21,17 @@ use {
             Shred, ShredId, ShredType, Shredder,
         },
         slot_stats::{ShredSource, SlotsStats},
-        trace::trace_turbine_slot_complete,
+        trace::{
+            trace_shred_frontier, trace_shred_gap, trace_shred_recv_range,
+            trace_turbine_slot_complete,
+        },
         transaction_address_lookup_table_scanner::scan_transaction,
     },
-    agave_perf_trace::EventsProducer,
     agave_feature_set::FeatureSet,
+    agave_perf_trace::{
+        EventsProducer, ShredKind as TraceShredKind, ShredSource as TraceShredSource,
+        timestamp as trace_timestamp,
+    },
     agave_snapshots::unpack_genesis_archive,
     assert_matches::debug_assert_matches,
     bincode::{deserialize, serialize},
@@ -294,6 +300,7 @@ pub struct Blockstore {
     pub(crate) manual_purge_request_sender: Mutex<Option<Sender<Slot>>>,
     pub slots_stats: SlotsStats,
     events_trace: Option<EventsProducer>,
+    open_shred_gaps: Mutex<HashMap<Slot, OpenShredGap>>,
 }
 
 pub struct IndexMetaWorkingSetEntry {
@@ -341,6 +348,33 @@ struct ShredInsertionTracker<'a> {
     index_meta_time_us: u64,
     // Collection of recently completed data sets (data portion of erasure batch)
     newly_completed_data_sets: Vec<CompletedDataSetInfo>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FrontierGap {
+    start_index: u32,
+    end_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpenShredGap {
+    start_ts: u64,
+    start_index: u32,
+    end_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingShredRecvRange {
+    ts: u64,
+    slot: Slot,
+    start_index: u32,
+    end_index: u32,
+    source: TraceShredSource,
+    shred_kind: TraceShredKind,
+    emit_recv_range: bool,
+    highest_received: u64,
+    consumed: u64,
+    frontier_gap: Option<FrontierGap>,
 }
 
 impl ShredInsertionTracker<'_> {
@@ -477,6 +511,7 @@ impl Blockstore {
             manual_purge_request_sender: Mutex::default(),
             slots_stats: SlotsStats::default(),
             events_trace,
+            open_shred_gaps: Mutex::default(),
         };
         blockstore.cleanup_old_entries()?;
 
@@ -500,6 +535,163 @@ impl Blockstore {
             ledger_signal_receiver,
             completed_slots_receiver,
         })
+    }
+
+    fn trace_shred_insert(
+        &self,
+        pending_recv_range: &mut Option<PendingShredRecvRange>,
+        slot: Slot,
+        index: u32,
+        slot_meta: &SlotMeta,
+        received_data_shreds: &ShredIndex,
+        source: ShredSource,
+    ) {
+        if self.events_trace.is_none() {
+            return;
+        }
+
+        let ts = trace_timestamp();
+        let source = match source {
+            ShredSource::Turbine => TraceShredSource::Turbine,
+            ShredSource::Repaired => TraceShredSource::Repair,
+            ShredSource::Recovered => TraceShredSource::Recovered,
+        };
+        let emit_recv_range = !matches!(source, TraceShredSource::Turbine);
+        let trace_update = PendingShredRecvRange {
+            ts,
+            slot,
+            start_index: index,
+            end_index: index,
+            source,
+            shred_kind: TraceShredKind::Data,
+            emit_recv_range,
+            highest_received: slot_meta.received.saturating_sub(1),
+            consumed: slot_meta.consumed,
+            frontier_gap: current_frontier_gap(slot_meta, received_data_shreds),
+        };
+
+        match pending_recv_range {
+            Some(pending)
+                if pending.slot == slot
+                    && pending.source == source
+                    && u64::from(index) == u64::from(pending.end_index).saturating_add(1) =>
+            {
+                pending.ts = trace_update.ts;
+                pending.end_index = index;
+                pending.highest_received = trace_update.highest_received;
+                pending.consumed = trace_update.consumed;
+                pending.frontier_gap = trace_update.frontier_gap;
+            }
+            _ => {
+                self.flush_pending_shred_recv_range(pending_recv_range);
+                *pending_recv_range = Some(trace_update);
+            }
+        }
+    }
+
+    fn flush_pending_shred_recv_range(
+        &self,
+        pending_recv_range: &mut Option<PendingShredRecvRange>,
+    ) {
+        let Some(pending_recv_range) = pending_recv_range.take() else {
+            return;
+        };
+        if pending_recv_range.emit_recv_range {
+            trace_shred_recv_range(
+                self.events_trace.as_ref(),
+                pending_recv_range.ts,
+                pending_recv_range.slot,
+                pending_recv_range.start_index,
+                pending_recv_range.end_index,
+                pending_recv_range.source,
+                pending_recv_range.shred_kind,
+                None,
+            );
+        }
+        trace_shred_frontier(
+            self.events_trace.as_ref(),
+            pending_recv_range.ts,
+            pending_recv_range.slot,
+            pending_recv_range.highest_received,
+            pending_recv_range.consumed,
+        );
+        self.update_shred_gap_state(
+            pending_recv_range.slot,
+            pending_recv_range.ts,
+            pending_recv_range.frontier_gap,
+        );
+    }
+
+    fn update_shred_gap_state(&self, slot: Slot, ts: u64, frontier_gap: Option<FrontierGap>) {
+        let Some(events_trace) = self.events_trace.as_ref() else {
+            return;
+        };
+
+        let mut open_shred_gaps = self.open_shred_gaps.lock().unwrap();
+        let open_gap = open_shred_gaps.get(&slot).copied();
+
+        match (open_gap, frontier_gap) {
+            (Some(open_gap), Some(frontier_gap))
+                if open_gap.start_index == frontier_gap.start_index
+                    && open_gap.end_index == frontier_gap.end_index => {}
+            (Some(open_gap), Some(frontier_gap)) => {
+                trace_shred_gap(
+                    Some(events_trace),
+                    open_gap.start_ts,
+                    ts,
+                    slot,
+                    open_gap.start_index,
+                    open_gap.end_index,
+                );
+                open_shred_gaps.insert(
+                    slot,
+                    OpenShredGap {
+                        start_ts: ts,
+                        start_index: frontier_gap.start_index,
+                        end_index: frontier_gap.end_index,
+                    },
+                );
+            }
+            (Some(open_gap), None) => {
+                trace_shred_gap(
+                    Some(events_trace),
+                    open_gap.start_ts,
+                    ts,
+                    slot,
+                    open_gap.start_index,
+                    open_gap.end_index,
+                );
+                open_shred_gaps.remove(&slot);
+            }
+            (None, Some(frontier_gap)) => {
+                open_shred_gaps.insert(
+                    slot,
+                    OpenShredGap {
+                        start_ts: ts,
+                        start_index: frontier_gap.start_index,
+                        end_index: frontier_gap.end_index,
+                    },
+                );
+            }
+            (None, None) => {}
+        }
+    }
+
+    fn close_open_shred_gap(&self, slot: Slot) {
+        let Some(events_trace) = self.events_trace.as_ref() else {
+            return;
+        };
+        let Some(open_gap) = self.open_shred_gaps.lock().unwrap().remove(&slot) else {
+            return;
+        };
+        trace_shred_gap(
+            Some(events_trace),
+            open_gap.start_ts,
+            trace_timestamp(),
+            slot,
+            open_gap.start_index,
+            open_gap.end_index,
+        );
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -944,6 +1136,7 @@ impl Blockstore {
         metrics: &mut BlockstoreInsertionMetrics,
     ) {
         let shreds = shreds.into_iter();
+        let mut pending_recv_range = None;
         metrics.num_shreds += shreds.len();
         let mut start = Measure::start("Shred insertion");
         for (shred, is_repaired) in shreds {
@@ -958,6 +1151,7 @@ impl Blockstore {
                     match self.check_insert_data_shred(
                         shred,
                         shred_insertion_tracker,
+                        &mut pending_recv_range,
                         is_trusted,
                         leader_schedule,
                         shred_source,
@@ -1015,6 +1209,7 @@ impl Blockstore {
                 }
             };
         }
+        self.flush_pending_shred_recv_range(&mut pending_recv_range);
         start.stop();
 
         metrics.insert_shreds_elapsed_us += start.as_us();
@@ -1069,6 +1264,7 @@ impl Blockstore {
         metrics: &mut BlockstoreInsertionMetrics,
     ) {
         let mut start = Measure::start("Shred recovery");
+        let mut pending_recv_range = None;
         let mut recovered_shreds = Vec::new();
         let recovered_data_shreds: Vec<_> = self
             .try_shred_recovery(
@@ -1104,6 +1300,7 @@ impl Blockstore {
             *match self.check_insert_data_shred(
                 Cow::Owned(shred),
                 shred_insertion_tracker,
+                &mut pending_recv_range,
                 is_trusted,
                 leader_schedule,
                 ShredSource::Recovered,
@@ -1120,6 +1317,7 @@ impl Blockstore {
                 Ok(()) => &mut metrics.num_recovered_inserted,
             } += 1;
         }
+        self.flush_pending_shred_recv_range(&mut pending_recv_range);
         start.stop();
         metrics.shred_recovery_elapsed_us += start.as_us();
     }
@@ -1451,6 +1649,7 @@ impl Blockstore {
     pub fn clear_unconfirmed_slots(&self, start: Slot, end: Slot) {
         let _lock = self.insert_shreds_lock.lock().unwrap();
         for slot in start..=end {
+            self.close_open_shred_gap(slot);
             // Purge the slot and insert an empty `SlotMeta` with only the `next_slots` field preserved.
             // Shreds inherently know their parent slot, and a parent's SlotMeta `next_slots` list
             // will be updated when the child is inserted (see `Blockstore::handle_chaining()`).
@@ -1666,6 +1865,24 @@ impl Blockstore {
             .entry(erasure_set)
             .or_insert(WorkingEntry::Dirty(MerkleRootMeta::from_shred(&shred)));
 
+        if self.events_trace.is_some() && !matches!(shred_source, ShredSource::Turbine) {
+            let trace_source = match shred_source {
+                ShredSource::Turbine => TraceShredSource::Turbine,
+                ShredSource::Repaired => TraceShredSource::Repair,
+                ShredSource::Recovered => TraceShredSource::Recovered,
+            };
+            trace_shred_recv_range(
+                self.events_trace.as_ref(),
+                trace_timestamp(),
+                slot,
+                shred.index(),
+                shred.index(),
+                trace_source,
+                TraceShredKind::Code,
+                None,
+            );
+        }
+
         if let HashMapEntry::Vacant(entry) = just_inserted_shreds.entry(shred.id()) {
             entry.insert(shred);
         }
@@ -1744,6 +1961,7 @@ impl Blockstore {
         &self,
         shred: Cow<'a, Shred>,
         shred_insertion_tracker: &mut ShredInsertionTracker<'a>,
+        pending_recv_range: &mut Option<PendingShredRecvRange>,
         is_trusted: bool,
         leader_schedule: Option<&LeaderScheduleCache>,
         shred_source: ShredSource,
@@ -1853,6 +2071,14 @@ impl Blockstore {
         just_inserted_shreds.insert(shred.id(), shred);
         index_meta_working_set_entry.did_insert_occur = true;
         slot_meta_entry.did_insert_occur = true;
+        self.trace_shred_insert(
+            pending_recv_range,
+            slot,
+            u32::try_from(shred_index).unwrap_or(u32::MAX),
+            slot_meta,
+            index_meta.data(),
+            shred_source,
+        );
         if let BTreeMapEntry::Vacant(entry) = erasure_metas.entry(erasure_set) {
             if let Some(meta) = self.erasure_meta(erasure_set).unwrap() {
                 entry.insert(WorkingEntry::Clean(meta));
@@ -4587,6 +4813,7 @@ impl Blockstore {
             let meta_backup = &slot_meta_entry.old_slot_meta;
             let newly_completed = is_newly_completed_slot(meta, meta_backup);
             if newly_completed {
+                self.close_open_shred_gap(meta.slot);
                 trace_turbine_slot_complete(
                     self.events_trace.as_ref(),
                     meta.slot,
@@ -4808,6 +5035,29 @@ fn update_slot_meta<'a>(
 
 fn get_last_hash<'a>(iterator: impl Iterator<Item = &'a Entry> + 'a) -> Option<Hash> {
     iterator.last().map(|entry| entry.hash)
+}
+
+fn current_frontier_gap(
+    slot_meta: &SlotMeta,
+    received_data_shreds: &ShredIndex,
+) -> Option<FrontierGap> {
+    let highest_received = slot_meta.received.checked_sub(1)?;
+    if highest_received <= slot_meta.consumed {
+        return None;
+    }
+
+    let start_index = slot_meta.consumed;
+    let mut end_index = start_index;
+    while end_index < highest_received
+        && !received_data_shreds.contains(end_index.saturating_add(1))
+    {
+        end_index = end_index.saturating_add(1);
+    }
+
+    Some(FrontierGap {
+        start_index: u32::try_from(start_index).ok()?,
+        end_index: u32::try_from(end_index).ok()?,
+    })
 }
 
 fn send_signals(
@@ -7419,6 +7669,7 @@ pub mod tests {
             .check_insert_data_shred(
                 Cow::Borrowed(&data_shred),
                 &mut shred_insertion_tracker,
+                &mut None,
                 false,
                 None,
                 ShredSource::Turbine,
@@ -7474,6 +7725,7 @@ pub mod tests {
         let insert_result = blockstore.check_insert_data_shred(
             Cow::Owned(new_data_shred),
             &mut shred_insertion_tracker,
+            &mut None,
             false,
             None,
             ShredSource::Turbine,
@@ -7568,6 +7820,7 @@ pub mod tests {
             .check_insert_data_shred(
                 Cow::Borrowed(&new_data_shred),
                 &mut shred_insertion_tracker,
+                &mut None,
                 false,
                 None,
                 ShredSource::Turbine,
