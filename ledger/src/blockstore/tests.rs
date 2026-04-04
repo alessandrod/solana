@@ -2054,6 +2054,7 @@ fn test_merkle_root_metas_data() {
             Cow::Borrowed(&data_shred),
             BlockLocation::Original,
             &mut shred_insertion_tracker,
+            &mut None,
             false,
             ShredSource::Turbine,
         )
@@ -2109,6 +2110,7 @@ fn test_merkle_root_metas_data() {
         Cow::Owned(new_data_shred),
         BlockLocation::Original,
         &mut shred_insertion_tracker,
+        &mut None,
         false,
         ShredSource::Turbine,
     );
@@ -2203,6 +2205,7 @@ fn test_merkle_root_metas_data() {
             Cow::Borrowed(&new_data_shred),
             BlockLocation::Original,
             &mut shred_insertion_tracker,
+            &mut None,
             false,
             ShredSource::Turbine,
         )
