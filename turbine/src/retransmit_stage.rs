@@ -7,9 +7,9 @@ use {
         cluster_nodes::{
             ClusterNodes, ClusterNodesCache, DATA_PLANE_FANOUT, Error, MAX_NUM_TURBINE_HOPS,
         },
-        trace::trace_retransmit_stats,
+        trace::{trace_retransmit_stats, trace_shred_turbine_layer},
     },
-    agave_perf_trace::EventsProducer,
+    agave_perf_trace::{EventsProducer, ShredKind},
     agave_votor::event::VotorEvent,
     agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError},
@@ -481,6 +481,16 @@ fn retransmit_shred(
     let (root_distance, addrs) =
         get_retransmit_addrs(&key, cache, addr_cache, socket_addr_space, stats)?;
     compute_turbine_peers.stop();
+    trace_shred_turbine_layer(
+        stats.events_trace.as_ref(),
+        key.slot(),
+        key.index(),
+        match key.shred_type() {
+            ShredType::Data => ShredKind::Data,
+            ShredType::Code => ShredKind::Code,
+        },
+        root_distance,
+    );
     stats
         .compute_turbine_peers_total
         .fetch_add(compute_turbine_peers.as_us(), Ordering::Relaxed);
