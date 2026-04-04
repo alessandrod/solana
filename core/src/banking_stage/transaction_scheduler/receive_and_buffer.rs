@@ -11,8 +11,8 @@ use {
         banking_stage::{
             consumer::Consumer, decision_maker::BufferedPacketsDecision, scheduler_messages::MaxAge,
         },
-        transaction_priority::calculate_priority_and_cost,
         trace::trace_transaction_state,
+        transaction_priority::calculate_priority_and_cost,
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
     agave_perf_trace::{TransactionState as TraceTransactionState, TxProducer, timestamp},
