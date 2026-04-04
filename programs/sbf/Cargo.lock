@@ -187,16 +187,16 @@ dependencies = [
 
 [[package]]
 name = "agave-memory"
-version = "4.3.0-alpha.2"
+version = "4.4.0-alpha.1"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
 ]
 
 [[package]]
 name = "agave-perf-trace"
-version = "4.3.0-alpha.2"
+version = "4.4.0-alpha.1"
 dependencies = [
  "libc",
  "log",
@@ -255,7 +255,7 @@ dependencies = [
  "libc",
  "nix",
  "rts-alloc",
- "shaq 3.0.0",
+ "shaq 4.0.0",
  "slotmap",
  "solana-fee",
  "solana-pubkey 4.3.0",
@@ -1522,7 +1522,7 @@ dependencies = [
  "encode_unicode",
  "libc",
  "unicode-width 0.2.0",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -5412,6 +5412,16 @@ dependencies = [
 
 [[package]]
 name = "shaq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34483a45b522d9b15cc1031536718acb3f2d94f7bc09d7156a3e8d173dfdffe"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "shaq"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e30d050a3cbf5723f8a2842638ad1112976b4aa167ec26b5ca86753fae57312"
@@ -6378,7 +6388,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_bytes",
- "shaq 3.0.0",
+ "shaq 4.0.0",
  "signal-hook",
  "slab",
  "smallvec",

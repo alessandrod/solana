@@ -301,7 +301,7 @@ impl ClusterNodes<RetransmitStage> {
         leader: &Pubkey,
         shred: &ShredId,
         fanout: usize,
-    ) -> Result<Option<Pubkey>, Error> {
+    ) -> Result<Option<(Pubkey, u8)>, Error> {
         // Exclude slot leader from list of nodes.
         if leader == &self.pubkey {
             return Err(Error::Loopback {
@@ -334,8 +334,20 @@ impl ClusterNodes<RetransmitStage> {
             .map(|index| &self.nodes[index])
             .take_while(|node| node.pubkey() != &self.pubkey)
             .collect();
-        let parent = get_retransmit_parent(fanout, nodes.len(), &nodes);
-        Ok(parent.map(Node::pubkey).copied())
+        let index = nodes.len();
+        let parent = get_retransmit_parent(fanout, index, &nodes);
+        let mut depth = 0u8;
+        let mut remaining = index;
+        let mut width = 1usize;
+        while remaining > 0 {
+            depth = depth.saturating_add(1);
+            remaining = remaining.saturating_sub(width);
+            width = width.saturating_mul(fanout);
+        }
+        Ok(parent
+            .map(Node::pubkey)
+            .copied()
+            .map(|parent| (parent, depth)))
     }
 }
 
@@ -771,6 +783,11 @@ mod tests {
             .shuffle(&mut chacha_rng)
             .map(|i| &cluster_nodes.nodes[i])
             .collect();
+        let cache: HashMap<_, _> = shuffled_nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (*node.pubkey(), index))
+            .collect();
 
         // Slot leader obviously has the shred
         let mut covered: HashSet<Pubkey> = HashSet::from([slot_leader]);
@@ -807,9 +824,17 @@ mod tests {
                 let parent = peer_cluster_nodes
                     .get_retransmit_parent(&slot_leader, &shred.id(), fanout)
                     .unwrap();
+                let mut depth = 0u8;
+                let mut remaining = cache[peer.pubkey()];
+                let mut width = 1usize;
+                while remaining > 0 {
+                    depth = depth.saturating_add(1);
+                    remaining = remaining.saturating_sub(width);
+                    width = width.saturating_mul(fanout);
+                }
 
                 assert_eq!(
-                    Some(addr),
+                    Some((addr, depth)),
                     parent,
                     "Found incorrect parent for node {}",
                     peer_cluster_nodes.pubkey
