@@ -282,8 +282,13 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         priority: u64,
         cost: u64,
     ) -> bool {
-        let transaction_id =
-            self.insert_map_only(TransactionState::new(transaction, max_age, priority, cost, 0));
+        let transaction_id = self.insert_map_only(TransactionState::new(
+            transaction,
+            max_age,
+            priority,
+            cost,
+            0,
+        ));
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
 
         self.push_ids_into_queue(std::iter::once(priority_id)) > 0

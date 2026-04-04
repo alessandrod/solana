@@ -914,7 +914,12 @@ mod tests {
             .set_bank(BankWithScheduler::new_without_scheduler(bank.clone()))
             .unwrap();
         let service_message = poh_service_message_receiver.try_recv().unwrap();
-        PohService::handle_service_message(&poh_recorder, service_message, &mut record_receiver);
+        PohService::handle_service_message(
+            &poh_recorder,
+            service_message,
+            &mut record_receiver,
+            &None,
+        );
 
         // ReplayStage treats either a pending controller message or a working bank as
         // `tpu_has_bank`, so SetBank completion must clear the former and publish the latter.
@@ -934,7 +939,12 @@ mod tests {
 
         poh_controller.reset(bank, None).unwrap();
         let service_message = poh_service_message_receiver.try_recv().unwrap();
-        PohService::handle_service_message(&poh_recorder, service_message, &mut record_receiver);
+        PohService::handle_service_message(
+            &poh_recorder,
+            service_message,
+            &mut record_receiver,
+            &None,
+        );
 
         // Once Reset clears both ReplayStage gates, the validator is eligible to start its
         // next leader bank.

@@ -1620,6 +1620,7 @@ pub mod test {
             },
             SwQosConfig::default(),
             cancel.clone(),
+            None,
         )
         .unwrap();
 
