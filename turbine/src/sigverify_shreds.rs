@@ -2,8 +2,10 @@ use {
     crate::{
         cluster_nodes::{ClusterNodesCache, DATA_PLANE_FANOUT},
         retransmit_stage::RetransmitStage,
+        trace::trace_shred_recv_timestamp,
     },
     agave_feature_set as feature_set,
+    agave_perf_trace::{EventsProducer, ShredKind},
     crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender},
     itertools::{Either, Itertools},
     rayon::{ThreadPool, ThreadPoolBuilder, prelude::*},
@@ -88,6 +90,13 @@ pub fn spawn_shred_sigverify(
 ) -> JoinHandle<()> {
     let mut stats = ShredSigVerifyStats::new(Instant::now());
     let cache = RwLock::new(LruCache::new(SIGVERIFY_LRU_CACHE_CAPACITY));
+    let events_trace = match EventsProducer::join() {
+        Ok(producer) => producer,
+        Err(err) => {
+            log::warn!("failed to initialize shred sigverify trace producer: {err}");
+            None
+        }
+    };
     let cluster_nodes_cache = ClusterNodesCache::<RetransmitStage>::new(
         CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
         CLUSTER_NODES_CACHE_TTL,
@@ -121,6 +130,7 @@ pub fn spawn_shred_sigverify(
                 &cluster_nodes_cache,
                 repair_nonce_location_lookup.as_ref(),
                 &cache,
+                events_trace.as_ref(),
                 &mut stats,
                 &mut shred_buffer,
             ) {
@@ -152,6 +162,7 @@ fn run_shred_sigverify<const K: usize>(
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     repair_nonce_location_lookup: &RepairNonceLocationLookup,
     cache: &RwLock<LruCache>,
+    events_trace: Option<&EventsProducer>,
     stats: &mut ShredSigVerifyStats,
     shred_buffer: &mut Vec<PacketBatch>,
 ) -> Result<(), ShredSigverifyError> {
@@ -227,6 +238,7 @@ fn run_shred_sigverify<const K: usize>(
                     cluster_info,
                     leader_schedule_cache,
                     cluster_nodes_cache,
+                    events_trace,
                     stats,
                     keypair,
                 )
@@ -313,11 +325,15 @@ fn maybe_verify_and_resign_packet(
     cluster_info: &ClusterInfo,
     leader_schedule_cache: &LeaderScheduleCache,
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
+    events_trace: Option<&EventsProducer>,
     stats: &ShredSigVerifyStats,
     keypair: &Keypair,
 ) -> Result<(), ResignError> {
     let repair = packet.meta().repair();
     let shred = get_shred(packet.as_ref()).ok_or(shred::Error::InvalidPacketSize)?;
+    let shred_id = (!repair)
+        .then(|| shred::layout::get_shred_id(shred))
+        .flatten();
     let is_signed = is_retransmitter_signed_variant(shred)?;
     if is_signed {
         // Repair packets do not follow turbine tree and
@@ -353,10 +369,17 @@ fn maybe_verify_and_resign_packet(
         resign_packet(packet, keypair)?;
     }
 
+    if let Some(shred_id) = shred_id {
+        let shred_kind = match shred_id.shred_type() {
+            shred::ShredType::Data => ShredKind::Data,
+            shred::ShredType::Code => ShredKind::Code,
+        };
+        trace_shred_recv_timestamp(events_trace, shred_id.slot(), shred_id.index(), shred_kind);
+    }
+
     Ok(())
 }
 
-#[must_use]
 fn verify_retransmitter_signature(
     shred: &[u8],
     root_bank: &Bank,
@@ -389,7 +412,7 @@ fn verify_retransmitter_signature(
     let cluster_nodes =
         cluster_nodes_cache.get(shred.slot(), root_bank, working_bank, cluster_info);
     let parent = match cluster_nodes.get_retransmit_parent(&leader.id, &shred, DATA_PLANE_FANOUT) {
-        Ok(Some(parent)) => parent,
+        Ok(Some((parent, _depth))) => parent,
         Ok(None) => {
             stats
                 .num_retranmitter_signature_skipped
@@ -739,6 +762,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &stats,
                     &keypair,
                 )
@@ -760,6 +784,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &stats,
                     &keypair,
                 )
@@ -781,6 +806,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &stats,
                     &keypair,
                 )
@@ -799,6 +825,7 @@ mod tests {
                     &cluster_info,
                     &leader_schedule_cache,
                     &cluster_nodes_cache,
+                    None,
                     &stats,
                     &keypair,
                 )
