@@ -5832,6 +5832,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shaq"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34483a45b522d9b15cc1031536718acb3f2d94f7bc09d7156a3e8d173dfdffe"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5930,10 +5940,10 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slowlana-trace"
 version = "0.1.0"
-source = "git+https://github.com/alessandrod/slowlana-trace.git#361f03b837c5ba5d4c22ab7241608cc7a23816e7"
+source = "git+https://github.com/alessandrod/slowlana-trace.git#08b42266b1fe2a13af2de88f487a6693dd95e739"
 dependencies = [
  "libc",
- "shaq",
+ "shaq 2.0.0",
 ]
 
 [[package]]
@@ -6775,7 +6785,7 @@ dependencies = [
  "rustls 0.23.36",
  "serde",
  "serde_bytes",
- "shaq",
+ "shaq 1.0.2",
  "signal-hook",
  "slab",
  "solana-account",
