@@ -246,8 +246,8 @@ impl ShredFetchStage {
                     exit.clone(),
                     TimestampedShredSender(packet_sender.clone()),
                     receiver_stats.clone(),
-                    Some(Duration::from_millis(5)), // coalesce
-                    false,                          // is_staked_service
+                    None,
+                    false, // is_staked_service
                 )
             })
             .collect();
