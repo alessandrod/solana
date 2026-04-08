@@ -5,7 +5,6 @@ use {
     },
     agave_feature_set as feature_set,
     crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender},
-    itertools::{Either, Itertools},
     rayon::{ThreadPool, ThreadPoolBuilder, prelude::*},
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -21,7 +20,7 @@ use {
     solana_perf::{
         self,
         deduper::Deduper,
-        packet::{PacketBatch, PacketRefMut},
+        packet::{PacketBatch, PacketRef, PacketRefMut},
     },
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
@@ -182,66 +181,122 @@ fn run_shred_sigverify<const K: usize>(
         (bank_forks.working_bank(), bank_forks.root_bank())
     };
     let self_pubkey = keypair.pubkey();
-    let (num_duplicates, num_discards_post, resign_micros) = thread_pool.install(|| {
+    let (num_duplicates, num_discards_post, resign_micros, shreds, repairs) =
+        thread_pool.install(|| {
         shred_buffer
             .par_iter_mut()
             .flatten()
-            .map(|mut packet| {
-                if packet.meta().discard() {
-                    return (0, 1, 0);
-                }
-                let mut num_duplicates = 0;
-                let duplicate = shred::wire::get_shred(packet.as_ref())
-                    .map(|shred| deduper.dedup(shred))
-                    .unwrap_or(true);
-                if duplicate && !packet.meta().repair() {
-                    packet.meta_mut().set_discard(true);
-                    num_duplicates = 1;
-                }
-                if !packet.meta().discard()
-                    && !verify_packet_signature(
-                        &self_pubkey,
-                        packet.as_ref(),
+            .fold(
+                || (0, 0, 0, Vec::new(), Vec::new()),
+                |(
+                    mut num_duplicates_acc,
+                    mut num_discards_post_acc,
+                    mut resign_micros_acc,
+                    mut shreds_acc,
+                    mut repairs_acc,
+                ),
+                 mut packet| {
+                    if packet.meta().discard() {
+                        num_discards_post_acc += 1;
+                        return (
+                            num_duplicates_acc,
+                            num_discards_post_acc,
+                            resign_micros_acc,
+                            shreds_acc,
+                            repairs_acc,
+                        );
+                    }
+                    let duplicate = shred::wire::get_shred(packet.as_ref())
+                        .map(|shred| deduper.dedup(shred))
+                        .unwrap_or(true);
+                    if duplicate && !packet.meta().repair() {
+                        packet.meta_mut().set_discard(true);
+                        num_duplicates_acc += 1;
+                    }
+                    if !packet.meta().discard()
+                        && !verify_packet_signature(
+                            &self_pubkey,
+                            packet.as_ref(),
+                            &working_bank,
+                            leader_schedule_cache,
+                            cache,
+                        )
+                    {
+                        packet.meta_mut().set_discard(true);
+                    }
+                    if packet.meta().discard() {
+                        num_discards_post_acc += 1;
+                        return (
+                            num_duplicates_acc,
+                            num_discards_post_acc,
+                            resign_micros_acc,
+                            shreds_acc,
+                            repairs_acc,
+                        );
+                    }
+                    let resign_start = Instant::now();
+                    if maybe_verify_and_resign_packet(
+                        &mut packet,
+                        &root_bank,
                         &working_bank,
+                        cluster_info,
                         leader_schedule_cache,
-                        cache,
+                        cluster_nodes_cache,
+                        stats,
+                        keypair,
                     )
-                {
-                    packet.meta_mut().set_discard(true);
-                }
-                let num_discards_post = usize::from(packet.meta().discard());
-                if packet.meta().discard() {
-                    return (num_duplicates, num_discards_post, 0);
-                }
-                let resign_start = Instant::now();
-                if maybe_verify_and_resign_packet(
-                    &mut packet,
-                    &root_bank,
-                    &working_bank,
-                    cluster_info,
-                    leader_schedule_cache,
-                    cluster_nodes_cache,
-                    stats,
-                    keypair,
-                )
-                .is_err()
-                {
-                    packet.meta_mut().set_discard(true);
-                }
-                (
-                    num_duplicates,
-                    num_discards_post,
-                    resign_start.elapsed().as_micros() as u64,
-                )
-            })
+                    .is_err()
+                    {
+                        packet.meta_mut().set_discard(true);
+                    }
+                    resign_micros_acc += resign_start.elapsed().as_micros() as u64;
+                    if !packet.meta().discard()
+                        && let Some(shred) = shred::layout::get_shred(packet.as_ref())
+                    {
+                        let shred = shred::Payload::from(shred.to_vec());
+                        if packet.meta().repair() {
+                            // No need for Arc overhead here because repaired shreds are
+                            // not retranmitted.
+                            repairs_acc.push(shred);
+                        } else {
+                            // Share the payload between the retransmit-stage and the
+                            // window-service.
+                            shreds_acc.push(shred);
+                        }
+                    }
+                    (
+                        num_duplicates_acc,
+                        num_discards_post_acc,
+                        resign_micros_acc,
+                        shreds_acc,
+                        repairs_acc,
+                    )
+                },
+            )
             .reduce(
-                || (0, 0, 0),
-                |(num_duplicates_a, num_discards_post_a, resign_micros_a),
-                 (num_duplicates_b, num_discards_post_b, resign_micros_b)| {
+                || (0, 0, 0, Vec::new(), Vec::new()),
+                |(
+                    num_duplicates_a,
+                    num_discards_post_a,
+                    resign_micros_a,
+                    mut shreds_a,
+                    mut repairs_a,
+                ),
+                 (
+                    num_duplicates_b,
+                    num_discards_post_b,
+                    resign_micros_b,
+                    shreds_b,
+                    repairs_b,
+                )| {
+                    shreds_a.extend(shreds_b);
+                    repairs_a.extend(repairs_b);
                     (
                         num_duplicates_a + num_duplicates_b,
                         num_discards_post_a + num_discards_post_b,
                         resign_micros_a + resign_micros_b,
+                        shreds_a,
+                        repairs_a,
                     )
                 },
             )
@@ -249,26 +304,6 @@ fn run_shred_sigverify<const K: usize>(
     stats.num_duplicates += num_duplicates;
     stats.num_discards_post += num_discards_post;
     stats.resign_micros += resign_micros;
-    // Extract shred payload from packets, and separate out repaired shreds.
-    let (shreds, repairs): (Vec<_>, Vec<_>) = shred_buffer
-        .iter()
-        .flat_map(|batch| batch.iter())
-        .filter(|packet| !packet.meta().discard())
-        .filter_map(|packet| {
-            let shred = shred::layout::get_shred(packet)?.to_vec();
-            Some((shred, packet.meta().repair()))
-        })
-        .partition_map(|(shred, repair)| {
-            if repair {
-                // No need for Arc overhead here because repaired shreds are
-                // not retranmitted.
-                Either::Right(shred::Payload::from(shred))
-            } else {
-                // Share the payload between the retransmit-stage and the
-                // window-service.
-                Either::Left(shred::Payload::from(shred))
-            }
-        });
     // Repaired shreds are not retransmitted.
     stats.num_retransmit_shreds += shreds.len();
     if let Err(send_err) = retransmit_sender.try_send(shreds.clone()) {
