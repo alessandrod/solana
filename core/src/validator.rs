@@ -1549,7 +1549,7 @@ impl Validator {
                 (
                     Some(transmitter),
                     Some(XdpSender::new(sender.clone(), src_addr)),
-                    Some(sender),
+                    Some((sender, *src_addr.ip())),
                 )
             } else {
                 (None, None, None)

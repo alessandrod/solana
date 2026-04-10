@@ -1,19 +1,22 @@
-//! This module defines [`QuicSocket`], which selects between kernel-UDP and XDP-backed QUIC socket
-//! configurations.
+//! This module defines [`QuicSocket`], which allows selecting between kernel UDP and AF_XDP-backed
+//! QUIC socket configurations.
 use {
-    agave_xdp::transmitter::{BytesTxPacket, XdpSender},
+    agave_xdp::{
+        ecn_codepoint::EcnCodepoint as XdpEcnCodepoint,
+        transmitter::{BytesTxPacket, XdpSender},
+    },
     bytes::Bytes,
     crossbeam_channel::TrySendError,
     nix::ifaddrs::getifaddrs,
     quinn::{
         AsyncUdpSocket, UdpPoller,
-        udp::{RecvMeta, Transmit, UdpSocketState},
+        udp::{EcnCodepoint as QuinnEcnCodepoint, RecvMeta, Transmit, UdpSocketState},
     },
     std::{
         fmt::{self, Debug},
         future::Future,
         io::{self, IoSliceMut},
-        net::{IpAddr, SocketAddr, SocketAddrV4},
+        net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
         pin::Pin,
         sync::{
             Arc,
@@ -24,14 +27,13 @@ use {
     tokio::io::Interest,
 };
 
-/// [`QuicSocket`] is a thin wrapper that simplifies switching between a kernel UDP socket and an
-/// XDP-backed socket configuration.
+/// [`QuicSocket`] is an enum for selecting between a kernel UDP socket and an AF_XDP-backed
+/// socket for QUIC communication.
 #[derive(Debug)]
 pub enum QuicSocket {
-    /// A QUIC socket that uses XDP for sending and kernel UDP socket for receiving.
+    /// A QUIC socket that uses AF_XDP for sending and a kernel UDP socket for receiving.
     Xdp(QuicXdpSocketBundle),
-    /// A QUIC socket that uses kernel UDP socket for both sending and receiving. This is used when
-    /// XDP is not available or disabled.
+    /// A QUIC socket that uses kernel UDP socket for both sending and receiving.
     Kernel(std::net::UdpSocket),
 }
 
@@ -42,26 +44,36 @@ impl From<std::net::UdpSocket> for QuicSocket {
 }
 
 impl QuicSocket {
-    pub fn with_xdp(socket: std::net::UdpSocket, xdp_sender: XdpSender) -> Self {
-        Self::Xdp(QuicXdpSocketBundle { socket, xdp_sender })
+    pub fn with_xdp(
+        socket: std::net::UdpSocket,
+        fallback_src_ip: Ipv4Addr,
+        xdp_sender: XdpSender,
+    ) -> Self {
+        Self::Xdp(QuicXdpSocketBundle {
+            socket,
+            fallback_src_ip,
+            xdp_sender,
+        })
     }
 
+    #[cfg(feature = "dev-context-only-utils")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {
-            QuicSocket::Xdp(cfg) => cfg.socket.local_addr(),
+            QuicSocket::Xdp(bundle) => bundle.socket.local_addr(),
             QuicSocket::Kernel(socket) => socket.local_addr(),
         }
     }
 }
 
-/// [`QuicXdpSocketBundle`] bundles the resources required to construct an XDP-backed QUIC socket.
+/// [`QuicXdpSocketBundle`] bundles the resources required to construct an AF_XDP-backed QUIC socket.
 ///
 /// It carries both an [`XdpSender`] and a [`std::net::UdpSocket`], rather than constructing an
-/// `AsyncUdpSocket` directly, because the underlying sockets can be created only when a Tokio
-/// runtime is present. In Streamer and related components, that runtime is created deep in the call
-/// stack, so this bundle is propagated up to endpoint creation.
+/// [`QuicXdpTxSocket`] directly, because the underlying sockets can only be created when a Tokio
+/// runtime is present. `fallback_src_ip` is used when the local address of `socket` is a
+/// wildcard address.
 pub struct QuicXdpSocketBundle {
     pub socket: std::net::UdpSocket,
+    pub fallback_src_ip: Ipv4Addr,
     pub xdp_sender: XdpSender,
 }
 
@@ -73,34 +85,47 @@ impl Debug for QuicXdpSocketBundle {
     }
 }
 
-/// [`QuicXdpTxSocket`] implements `AsyncUdpSocket`. It always uses `UdpSocket` for ingress traffic.
-/// For egress traffic, it employs an underlying `IndexedXdpSender` for non-local destinations. For
+/// [`QuicXdpTxSocket`] uses AF_XDP for egress traffic and `UdpSocket` for ingress traffic.
+///
+/// For egress traffic, it employs an underlying `QuicXdpSender` for non-local destinations. For
 /// destinations owned by the local host (routed via `lo`, including loopback and local interface
-/// IPs), it falls back to a kernel `UdpSocket`, because AF_XDP cannot transmit to `lo`.
+/// IPs), it falls back to a kernel `UdpSocket`.
 pub(crate) struct QuicXdpTxSocket {
     udp_socket: Arc<UdpSocket>,
-    xdp_sender: IndexedXdpSender,
+    xdp_sender: QuicXdpSender,
     local_ips: Vec<IpAddr>,
 }
 
 impl QuicXdpTxSocket {
     pub fn new(
-        QuicXdpSocketBundle { socket, xdp_sender }: QuicXdpSocketBundle,
+        QuicXdpSocketBundle {
+            socket,
+            fallback_src_ip,
+            xdp_sender,
+        }: QuicXdpSocketBundle,
     ) -> io::Result<Self> {
         let src_addr = socket.local_addr()?;
         let SocketAddr::V4(src_addr) = src_addr else {
-            panic!("IPv6 not supported");
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Only IPv4 addresses are supported",
+            ));
+        };
+        // if local address is wildcard, override it with fallback_src_ip.
+        let src_addr = if src_addr.ip().is_unspecified() {
+            SocketAddrV4::new(fallback_src_ip, src_addr.port())
+        } else {
+            src_addr
         };
 
-        // Collect local interface IPs once at construction time. We intentionally do not refresh
-        // them if interface addresses change later. This is a low-risk tradeoff because
-        // local-destination egress is expected to be rare: only RPC's sendTransaction traffic or
-        // local testing.
+        // Collect local interface IPs once at construction time. We do not refresh them if
+        // interface addresses change later. This is a low-risk tradeoff because local-destination
+        // egress is expected to be rare: only RPC sendTransaction traffic or local testing.
         let local_ips = collect_local_ipv4_ips()?;
 
         Ok(Self {
             udp_socket: Arc::new(UdpSocket::new(socket)?),
-            xdp_sender: IndexedXdpSender::new(xdp_sender, src_addr),
+            xdp_sender: QuicXdpSender::new(xdp_sender, src_addr),
             local_ips,
         })
     }
@@ -120,31 +145,69 @@ impl fmt::Debug for QuicXdpTxSocket {
 
 impl AsyncUdpSocket for QuicXdpTxSocket {
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        // The kernel UDP socket poller is always returned here, ignoring the XDP sender. It is
-        // correct implementation under the following 2 assumptions:
+        // The kernel UDP socket poller is always returned here, ignoring the XDP sender. This
+        // implementation is correct under the following assumptions:
         // 1. When egress AF_XDP is enabled, the kernel UDP socket is used rarely and only for local
-        //    destinations, so it shall always be writable.
-        // 2. XdpSender is almost always Ready.
+        //    destinations, so it should almost always be writable.
+        // 2. `QuicXdpSender` can almost always enqueue.
         //
-        // Hence, the following situation is very improbable: if it happens that the UDP socket is
-        // not writable, but actually XdpSender is writable, we might have suboptimal performance
-        // until the UDP socket becomes writable. The other situation is when the UDP Poller is
-        // Ready but the selected channel in `IndexedXdpSender` is full. In this case, the try_send
-        // will fail with `WouldBlock`, and the caller will call `poll_writable` again, which leads
-        // to selecting the other channel in the next round.
+        // A rare mismatch is still possible: if the UDP socket is not writable while
+        // `QuicXdpSender` could enqueue, throughput may be temporarily suboptimal until the UDP
+        // socket becomes writable. The reverse mismatch is also possible: the UDP poller is ready
+        // but the selected `QuicXdpSender` channel is full. In this case `try_send` fails with
+        // `WouldBlock`, and the caller invokes `poll_writable` again, which can select another
+        // channel in the next round.
         self.udp_socket.clone().create_io_poller()
     }
 
+    /// Attempts to send the given [`Transmit`].
+    ///
+    /// For non-local destinations uses AF_XDP, otherwise kernel UDP. If `t.segment_size` is
+    /// `Some(n)`, `t.contents` is split into datagrams of at most `n` bytes and each datagram is
+    /// enqueued separately.
+    ///
+    /// If enqueueing fails after some datagrams were already enqueued, this method returns
+    /// `Err(WouldBlock)`. The caller may retry the whole transmit, which can cause duplicate
+    /// datagrams to be sent for the already enqueued chunks. QUIC packet numbers make this
+    /// protocol-safe, but duplicates can still degrade throughput and congestion behavior. This
+    /// implementation therefore assumes the AF_XDP channel is rarely (ideally never) full.
     fn try_send(&self, t: &Transmit<'_>) -> io::Result<()> {
         if self.should_use_kernel_udp(t.destination) {
             return self.udp_socket.try_send(t);
         }
-        let payload = Bytes::from(t.contents.to_vec());
-        match self.xdp_sender.try_send(t.destination, payload) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(io::ErrorKind::WouldBlock.into()),
-            Err(TrySendError::Disconnected(_)) => Err(io::ErrorKind::BrokenPipe.into()),
+        let src_ip = match t.src_ip {
+            Some(IpAddr::V4(ip)) => Some(ip),
+            Some(IpAddr::V6(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "IPv6 source addresses are not supported",
+                ));
+            }
+            None => None,
+        };
+
+        let segment_size = t.segment_size.unwrap_or(t.contents.len());
+        if segment_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "segment_size must be greater than zero",
+            ));
         }
+        // Preserve one ECN value across all segments.
+        for chunk in t.contents.chunks(segment_size) {
+            let payload = Bytes::copy_from_slice(chunk);
+            match self
+                .xdp_sender
+                .try_send(src_ip, t.destination, t.ecn, payload)
+            {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => return Err(io::ErrorKind::WouldBlock.into()),
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn poll_recv(
@@ -161,8 +224,9 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
     }
 
     fn max_transmit_segments(&self) -> usize {
-        // no GSO batches, so each transmit describes exactly one datagram
-        1
+        // Delegate to `UdpSocket`, which probes UDP GSO support at runtime.
+        // This value might be in between 1 and 64.
+        self.udp_socket.max_transmit_segments()
     }
 
     fn max_receive_segments(&self) -> usize {
@@ -174,17 +238,19 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
     }
 }
 
-/// [`IndexedXdpSender`] wraps `XdpSender` to provide a simple round-robin sender index for each
-/// packet sent. It is needed because `AsyncUdpSocket::try_send` does not provide a way to specify
-/// the sender index. If the `XdpSender` has only one sender, the index is always 0 and the atomic
-/// is not used.
-struct IndexedXdpSender {
+/// [`QuicXdpSender`] wraps [`XdpSender`] and provides round-robin sender selection.
+///
+/// This wrapper provides a simple round-robin sender index for each packet
+/// sent. It is required because `AsyncUdpSocket::try_send` does not provide a way to specify the
+/// sender index. If the `XdpSender` has only one sender, the index is always 0 and the atomic is
+/// not used.
+struct QuicXdpSender {
     xdp_sender: XdpSender,
     src_addr: SocketAddrV4,
     next_sender_index: Option<AtomicUsize>,
 }
 
-impl IndexedXdpSender {
+impl QuicXdpSender {
     fn new(xdp_sender: XdpSender, src_addr: SocketAddrV4) -> Self {
         let next_sender_index = (xdp_sender.len() > 1).then(|| AtomicUsize::new(0));
         Self {
@@ -196,22 +262,31 @@ impl IndexedXdpSender {
 
     fn try_send(
         &self,
+        src_ip: Option<Ipv4Addr>,
         destination: SocketAddr,
+        ecn: Option<QuinnEcnCodepoint>,
         payload: Bytes,
     ) -> Result<(), TrySendError<BytesTxPacket>> {
         let sender_idx = self
             .next_sender_index
             .as_ref()
             .map_or(0, |idx| idx.fetch_add(1, Ordering::Relaxed));
+
+        // For wildcard or multihoming cases, `src_ip` may be overridden. In that case, use the
+        // source port from `self.src_addr`.
+        let src_ip = src_ip.unwrap_or(*self.src_addr.ip());
+        let src_addr = SocketAddrV4::new(src_ip, self.src_addr.port());
+        let ecn = ecn.map(quinn_ecn_to_xdp);
+
         self.xdp_sender.try_send(
             sender_idx,
-            BytesTxPacket::new(self.src_addr, destination, payload),
+            BytesTxPacket::new(src_addr, destination, ecn, payload),
         )
     }
 }
 
-/// [`UdpSocket`] adapts a Tokio [`tokio::net::UdpSocket`] and its [`UdpSocketState`]
-/// to implement [`AsyncUdpSocket`].
+/// [`UdpSocket`] adapts a Tokio [`tokio::net::UdpSocket`] and its [`UdpSocketState`] to implement
+/// [`AsyncUdpSocket`].
 #[derive(Debug)]
 struct UdpSocket {
     io: tokio::net::UdpSocket,
@@ -249,10 +324,12 @@ impl AsyncUdpSocket for UdpSocket {
     ) -> Poll<io::Result<usize>> {
         loop {
             ready!(self.io.poll_recv_ready(cx))?;
-            if let Ok(res) = self.io.try_io(Interest::READABLE, || {
+            match self.io.try_io(Interest::READABLE, || {
                 self.inner.recv((&self.io).into(), bufs, meta)
             }) {
-                return Poll::Ready(Ok(res));
+                Ok(res) => return Poll::Ready(Ok(res)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Poll::Ready(Err(e)),
             }
         }
     }
@@ -276,7 +353,7 @@ impl AsyncUdpSocket for UdpSocket {
 
 pin_project_lite::pin_project! {
     /// Helper adapting a function `MakeFut` that constructs a single-use future `Fut` into a
-    /// [`UdpPoller`] that may be reused indefinitely
+    /// [`UdpPoller`] that may be reused indefinitely.
     struct UdpPollHelper<MakeFut, Fut> {
         make_fut: MakeFut,
         #[pin]
@@ -287,7 +364,7 @@ pin_project_lite::pin_project! {
 impl<MakeFut, Fut> UdpPollHelper<MakeFut, Fut> {
     /// Construct a [`UdpPoller`] that calls `make_fut` to get the future to poll, storing it until
     /// it yields [`Poll::Ready`], then creating a new one on the next
-    /// [`poll_writable`](UdpPoller::poll_writable)
+    /// [`poll_writable`](UdpPoller::poll_writable).
     fn new(make_fut: MakeFut) -> Self {
         Self {
             make_fut,
@@ -339,4 +416,13 @@ fn collect_local_ipv4_ips() -> io::Result<Vec<IpAddr>> {
         }
     }
     Ok(ips)
+}
+
+#[inline]
+const fn quinn_ecn_to_xdp(ecn: QuinnEcnCodepoint) -> XdpEcnCodepoint {
+    match ecn {
+        QuinnEcnCodepoint::Ect0 => XdpEcnCodepoint::Ect0,
+        QuinnEcnCodepoint::Ect1 => XdpEcnCodepoint::Ect1,
+        QuinnEcnCodepoint::Ce => XdpEcnCodepoint::Ce,
+    }
 }

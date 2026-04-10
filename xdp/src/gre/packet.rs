@@ -2,6 +2,7 @@
 
 use {
     crate::{
+        ecn_codepoint::EcnCodepoint,
         netlink::{GreTunnelInfo, MacAddress},
         packet::{
             ETH_HEADER_SIZE, IP_HEADER_SIZE, UDP_HEADER_SIZE, write_eth_header, write_ip_header,
@@ -119,6 +120,7 @@ pub fn construct_gre_packet(
     src_port: u16,
     dst_port: u16,
     payload: &[u8],
+    ecn: Option<EcnCodepoint>,
     info: &GreTunnelInfo,
 ) -> Result<(), PacketError> {
     let payload_len = payload.len();
@@ -151,6 +153,7 @@ pub fn construct_gre_packet(
         &mut packet[inner_start..inner_start + IP_HEADER_SIZE],
         src_ip,
         dst_ip,
+        ecn,
         (UDP_HEADER_SIZE + payload_len) as u16,
     );
 

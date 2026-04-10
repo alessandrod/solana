@@ -61,7 +61,7 @@ use {
     },
     std::{
         collections::{HashMap, HashSet},
-        net::UdpSocket,
+        net::{Ipv4Addr, UdpSocket},
         num::NonZeroUsize,
         path::PathBuf,
         sync::{Arc, RwLock, atomic::AtomicBool},
@@ -118,7 +118,7 @@ impl Tpu {
         blockstore: Arc<Blockstore>,
         broadcast_type: &BroadcastStageType,
         turbine_xdp_sender: Option<TurbineXdpSender>,
-        quic_xdp_sender: Option<XdpSender>,
+        quic_xdp_sender: Option<(XdpSender, Ipv4Addr)>,
         exit: Arc<AtomicBool>,
         shred_version: u16,
         vote_tracker: Arc<VoteTracker>,
@@ -216,7 +216,7 @@ impl Tpu {
 
         // Streamer for TPU
         let transactions_quic_sockets =
-            into_quic_sockets(transactions_quic_sockets, quic_xdp_sender.as_ref());
+            into_quic_sockets(transactions_quic_sockets, quic_xdp_sender.clone());
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_quic_t,
@@ -236,7 +236,7 @@ impl Tpu {
 
         // Streamer for TPU forward
         let transactions_forwards_quic_sockets =
-            into_quic_sockets(transactions_forwards_quic_sockets, quic_xdp_sender.as_ref());
+            into_quic_sockets(transactions_forwards_quic_sockets, quic_xdp_sender);
         let SpawnServerResult {
             endpoints: _,
             thread: tpu_forwards_quic_t,
@@ -402,13 +402,13 @@ impl Tpu {
 
 fn into_quic_sockets(
     sockets: Vec<UdpSocket>,
-    quic_xdp_sender: Option<&XdpSender>,
+    quic_xdp_sender: Option<(XdpSender, Ipv4Addr)>,
 ) -> Vec<QuicSocket> {
-    sockets
-        .into_iter()
-        .map(|socket| match quic_xdp_sender {
-            Some(sender) => QuicSocket::with_xdp(socket, sender.clone()),
-            None => QuicSocket::from(socket),
-        })
-        .collect()
+    match quic_xdp_sender {
+        Some((xdp_sender, fallback_src_ip)) => sockets
+            .into_iter()
+            .map(|socket| QuicSocket::with_xdp(socket, fallback_src_ip, xdp_sender.clone()))
+            .collect(),
+        None => sockets.into_iter().map(QuicSocket::from).collect(),
+    }
 }
