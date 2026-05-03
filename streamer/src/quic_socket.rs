@@ -72,9 +72,9 @@ impl QuicSocket {
 /// runtime is present. `fallback_src_ip` is used when the local address of `socket` is a
 /// wildcard address.
 pub struct QuicXdpSocketBundle {
-    pub socket: std::net::UdpSocket,
-    pub fallback_src_ip: Ipv4Addr,
-    pub xdp_sender: XdpSender,
+    socket: std::net::UdpSocket,
+    fallback_src_ip: Ipv4Addr,
+    xdp_sender: XdpSender,
 }
 
 impl Debug for QuicXdpSocketBundle {

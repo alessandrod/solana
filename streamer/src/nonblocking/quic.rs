@@ -165,9 +165,9 @@ where
                 Arc::new(TokioRuntime),
             )
             .map_err(QuicServerError::EndpointFailed),
-            QuicSocket::Xdp(quic_xdp_socket_config) => {
+            QuicSocket::Xdp(quic_xdp_socket_bundle) => {
                 let socket = Arc::new(
-                    QuicXdpTxSocket::new(quic_xdp_socket_config)
+                    QuicXdpTxSocket::new(quic_xdp_socket_bundle)
                         .map_err(QuicServerError::EndpointFailed)?,
                 ) as Arc<dyn AsyncUdpSocket>;
                 Endpoint::new_with_abstract_socket(
