@@ -93,7 +93,7 @@ impl Debug for QuicXdpSocketBundle {
 pub(crate) struct QuicXdpTxSocket {
     udp_socket: Arc<UdpSocket>,
     xdp_sender: QuicXdpSender,
-    local_ips: Vec<IpAddr>,
+    local_ips: Vec<Ipv4Addr>,
 }
 
 impl QuicXdpTxSocket {
@@ -131,7 +131,7 @@ impl QuicXdpTxSocket {
     }
 
     fn should_use_kernel_udp(&self, dst: SocketAddr) -> bool {
-        dst.ip().is_loopback() || self.local_ips.contains(&dst.ip())
+        dst.ip().is_loopback() || matches!(dst.ip(), IpAddr::V4(ip) if self.local_ips.contains(&ip))
     }
 }
 
@@ -394,12 +394,12 @@ impl<MakeFut, Fut> Debug for UdpPollHelper<MakeFut, Fut> {
 }
 
 /// Collects IPv4 addresses assigned to local network interfaces.
-fn collect_local_ipv4_ips() -> io::Result<Vec<IpAddr>> {
+fn collect_local_ipv4_ips() -> io::Result<Vec<Ipv4Addr>> {
     let mut ips = Vec::new();
     for ifa in getifaddrs().map_err(io::Error::other)? {
         let Some(addr) = ifa.address else { continue };
         if let Some(v4) = addr.as_sockaddr_in() {
-            let ip = IpAddr::V4(v4.ip());
+            let ip = v4.ip();
             if !ips.contains(&ip) {
                 ips.push(ip);
             }
