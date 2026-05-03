@@ -162,9 +162,7 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
 
     /// Attempts to send the given [`Transmit`].
     ///
-    /// For non-local destinations uses AF_XDP, otherwise kernel UDP. If `t.segment_size` is
-    /// `Some(n)`, `t.contents` is split into datagrams of at most `n` bytes and each datagram is
-    /// enqueued separately.
+    /// For non-local destinations uses AF_XDP, otherwise kernel UDP.
     ///
     /// If enqueueing fails after some datagrams were already enqueued, this method returns
     /// `Err(WouldBlock)`. The caller may retry the whole transmit, which can cause duplicate
@@ -186,28 +184,21 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
             None => None,
         };
 
-        let segment_size = t.segment_size.unwrap_or(t.contents.len());
-        if segment_size == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "segment_size must be greater than zero",
-            ));
+        debug_assert!(
+            t.segment_size.is_none(),
+            "GSO segmentation is disabled for AF_XDP sends, but segment_size is {:?}",
+            t.segment_size
+        );
+
+        let payload = Bytes::copy_from_slice(t.contents);
+        match self
+            .xdp_sender
+            .try_send(src_ip, t.destination, t.ecn, payload)
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(io::ErrorKind::WouldBlock.into()),
+            Err(TrySendError::Disconnected(_)) => Err(io::ErrorKind::BrokenPipe.into()),
         }
-        // Preserve one ECN value across all segments.
-        for chunk in t.contents.chunks(segment_size) {
-            let payload = Bytes::copy_from_slice(chunk);
-            match self
-                .xdp_sender
-                .try_send(src_ip, t.destination, t.ecn, payload)
-            {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => return Err(io::ErrorKind::WouldBlock.into()),
-                Err(TrySendError::Disconnected(_)) => {
-                    return Err(io::ErrorKind::BrokenPipe.into());
-                }
-            }
-        }
-        Ok(())
     }
 
     fn poll_recv(
@@ -224,9 +215,8 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
     }
 
     fn max_transmit_segments(&self) -> usize {
-        // Delegate to `UdpSocket`, which probes UDP GSO support at runtime.
-        // This value might be in between 1 and 64.
-        self.udp_socket.max_transmit_segments()
+        // no GSO batches, so each transmit describes exactly one datagram
+        1
     }
 
     fn max_receive_segments(&self) -> usize {
