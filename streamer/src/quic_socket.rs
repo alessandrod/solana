@@ -173,6 +173,12 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
         if self.should_use_kernel_udp(t.destination) {
             return self.udp_socket.try_send(t);
         }
+        if t.destination.is_ipv6() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPv6 destination addresses are not supported for AF_XDP sends",
+            ));
+        }
         let src_ip = match t.src_ip {
             Some(IpAddr::V4(ip)) => Some(ip),
             Some(IpAddr::V6(_)) => {
