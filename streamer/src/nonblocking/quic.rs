@@ -5,7 +5,7 @@ use {
             qos::{ConnectionContext, OpaqueStreamerCounter, QosController},
         },
         quic::{QuicServerError, QuicStreamerConfig, StreamerStats, configure_server},
-        quic_socket::{QuicSocket, QuicXdpTxSocket},
+        quic_socket::{QuicSocket, QuicXdpSocketParts, QuicXdpTxSocket},
         streamer::StakedNodes,
     },
     bytes::{BufMut, Bytes, BytesMut},
@@ -165,9 +165,13 @@ where
                 Arc::new(TokioRuntime),
             )
             .map_err(QuicServerError::EndpointFailed),
-            QuicSocket::Xdp(quic_xdp_socket_bundle) => {
+            QuicSocket::Xdp(QuicXdpSocketParts {
+                socket,
+                fallback_src_ip,
+                xdp_sender,
+            }) => {
                 let socket = Arc::new(
-                    QuicXdpTxSocket::new(quic_xdp_socket_bundle)
+                    QuicXdpTxSocket::new(socket, fallback_src_ip, xdp_sender)
                         .map_err(QuicServerError::EndpointFailed)?,
                 ) as Arc<dyn AsyncUdpSocket>;
                 Endpoint::new_with_abstract_socket(

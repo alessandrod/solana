@@ -32,7 +32,7 @@ use {
 #[derive(Debug)]
 pub enum QuicSocket {
     /// A QUIC socket that uses AF_XDP for sending and a kernel UDP socket for receiving.
-    Xdp(QuicXdpSocketBundle),
+    Xdp(QuicXdpSocketParts),
     /// A QUIC socket that uses kernel UDP socket for both sending and receiving.
     Kernel(std::net::UdpSocket),
 }
@@ -49,7 +49,7 @@ impl QuicSocket {
         fallback_src_ip: Ipv4Addr,
         xdp_sender: XdpSender,
     ) -> Self {
-        Self::Xdp(QuicXdpSocketBundle {
+        Self::Xdp(QuicXdpSocketParts {
             socket,
             fallback_src_ip,
             xdp_sender,
@@ -59,27 +59,27 @@ impl QuicSocket {
     #[cfg(feature = "dev-context-only-utils")]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match self {
-            QuicSocket::Xdp(bundle) => bundle.socket.local_addr(),
+            QuicSocket::Xdp(parts) => parts.socket.local_addr(),
             QuicSocket::Kernel(socket) => socket.local_addr(),
         }
     }
 }
 
-/// [`QuicXdpSocketBundle`] bundles the resources required to construct an AF_XDP-backed QUIC socket.
+/// [`QuicXdpSocketParts`] wraps the resources required to construct an AF_XDP-backed QUIC socket.
 ///
 /// It carries both an [`XdpSender`] and a [`std::net::UdpSocket`], rather than constructing an
 /// [`QuicXdpTxSocket`] directly, because the underlying sockets can only be created when a Tokio
 /// runtime is present. `fallback_src_ip` is used when the local address of `socket` is a
 /// wildcard address.
-pub struct QuicXdpSocketBundle {
-    socket: std::net::UdpSocket,
-    fallback_src_ip: Ipv4Addr,
-    xdp_sender: XdpSender,
+pub struct QuicXdpSocketParts {
+    pub socket: std::net::UdpSocket,
+    pub fallback_src_ip: Ipv4Addr,
+    pub xdp_sender: XdpSender,
 }
 
-impl Debug for QuicXdpSocketBundle {
+impl Debug for QuicXdpSocketParts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("QuicXdpSocketBundle")
+        f.debug_struct("QuicXdpSocketParts")
             .field("socket", &self.socket)
             .finish()
     }
@@ -97,12 +97,10 @@ pub(crate) struct QuicXdpTxSocket {
 }
 
 impl QuicXdpTxSocket {
-    pub fn new(
-        QuicXdpSocketBundle {
-            socket,
-            fallback_src_ip,
-            xdp_sender,
-        }: QuicXdpSocketBundle,
+    pub(crate) fn new(
+        socket: std::net::UdpSocket,
+        fallback_src_ip: Ipv4Addr,
+        xdp_sender: XdpSender,
     ) -> io::Result<Self> {
         let src_addr = socket.local_addr()?;
         let SocketAddr::V4(src_addr) = src_addr else {
