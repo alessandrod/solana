@@ -26,7 +26,6 @@ use {
     agave_votor::event::VotorEventSender,
     agave_xdp::transmitter::XdpSender,
     crossbeam_channel::{Receiver, bounded, unbounded},
-    itertools::Either,
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -408,13 +407,13 @@ impl Tpu {
 fn into_quic_sockets(
     sockets: impl IntoIterator<Item = UdpSocket>,
     quic_xdp_sender: Option<(XdpSender, Ipv4Addr)>,
-) -> impl IntoIterator<Item = QuicSocket> {
-    match quic_xdp_sender {
-        Some((xdp_sender, fallback_src_ip)) => {
-            Either::Left(sockets.into_iter().map(move |socket| {
-                QuicSocket::with_xdp(socket, fallback_src_ip, xdp_sender.clone())
-            }))
-        }
-        None => Either::Right(sockets.into_iter().map(QuicSocket::from)),
-    }
+) -> impl Iterator<Item = QuicSocket> {
+    sockets
+        .into_iter()
+        .map(move |socket| match &quic_xdp_sender {
+            Some((xdp_sender, fallback_src_ip)) => {
+                QuicSocket::with_xdp(socket, *fallback_src_ip, xdp_sender.clone())
+            }
+            None => QuicSocket::from(socket),
+        })
 }
