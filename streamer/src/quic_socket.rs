@@ -232,19 +232,18 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
 
 /// [`QuicXdpSender`] wraps [`XdpSender`] and provides round-robin sender selection.
 ///
-/// This wrapper provides a simple round-robin sender index for each packet
-/// sent. It is required because `AsyncUdpSocket::try_send` does not provide a way to specify the
-/// sender index. If the `XdpSender` has only one sender, the index is always 0 and the atomic is
-/// not used.
+/// This wrapper provides a simple round-robin sender index for each packet sent. It is required
+/// because `AsyncUdpSocket::try_send` does not provide a way to specify the sender index. If the
+/// `XdpSender` has only one sender, the index is always 0.
 struct QuicXdpSender {
     xdp_sender: XdpSender,
     src_addr: SocketAddrV4,
-    next_sender_index: Option<AtomicUsize>,
+    next_sender_index: AtomicUsize,
 }
 
 impl QuicXdpSender {
     fn new(xdp_sender: XdpSender, src_addr: SocketAddrV4) -> Self {
-        let next_sender_index = (xdp_sender.len() > 1).then(|| AtomicUsize::new(0));
+        let next_sender_index = AtomicUsize::new(0);
         Self {
             xdp_sender,
             src_addr,
@@ -259,10 +258,7 @@ impl QuicXdpSender {
         ecn: Option<QuinnEcnCodepoint>,
         payload: Bytes,
     ) -> Result<(), TrySendError<BytesTxPacket>> {
-        let sender_idx = self
-            .next_sender_index
-            .as_ref()
-            .map_or(0, |idx| idx.fetch_add(1, Ordering::Relaxed));
+        let sender_idx = self.next_sender_index.fetch_add(1, Ordering::Relaxed);
 
         // For wildcard or multihoming cases, `src_ip` may be overridden. In that case, use the
         // source port from `self.src_addr`.
