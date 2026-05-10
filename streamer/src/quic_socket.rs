@@ -228,7 +228,7 @@ impl AsyncUdpSocket for QuicXdpTxSocket {
     }
 
     fn may_fragment(&self) -> bool {
-        self.udp_socket.may_fragment()
+        false
     }
 }
 
