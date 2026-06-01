@@ -1237,6 +1237,17 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help(DefaultSchedulerPool::cli_message()),
     )
     .arg(
+        Arg::with_name("unified_scheduler_handler_arenas")
+            .long("unified-scheduler-handler-arenas")
+            .value_name("COUNT")
+            .takes_value(true)
+            .validator(|s| is_within_range(s, 1..))
+            .help(
+                "Number of jemalloc arenas to round-robin across unified scheduler handler \
+                 threads",
+            ),
+    )
+    .arg(
         Arg::with_name("no_xdp")
             .long("no-xdp")
             .takes_value(false)
@@ -1571,6 +1582,17 @@ mod tests {
                 &other_filter_key.to_string(),
             ],
             expected_args,
+        );
+    }
+
+    #[test]
+    fn verify_args_struct_by_command_run_with_unified_scheduler_handler_arenas() {
+        let default_run_args = RunArgs::default();
+
+        verify_args_struct_by_command_run_with_identity_setup(
+            default_run_args.clone(),
+            vec!["--unified-scheduler-handler-arenas", "3"],
+            default_run_args,
         );
     }
 

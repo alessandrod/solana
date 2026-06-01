@@ -242,6 +242,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-memory"
+version = "4.3.0-alpha.2"
+dependencies = [
+ "thiserror 2.0.18",
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "agave-precompiles"
 version = "4.4.0-alpha.1"
 dependencies = [
@@ -11424,6 +11434,7 @@ version = "4.4.0-alpha.1"
 dependencies = [
  "agave-banking-stage-ingress-types",
  "agave-logger",
+ "agave-memory",
  "assert_matches",
  "crossbeam-channel",
  "dashmap",
@@ -11449,6 +11460,7 @@ dependencies = [
  "solana-unified-scheduler-pool",
  "static_assertions",
  "test-case",
+ "tikv-jemallocator",
 ]
 
 [[package]]
