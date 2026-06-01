@@ -98,9 +98,11 @@ wincode = { workspace = true }
 
 [dev-dependencies]
 agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
+agave-memory = { workspace = true }
 agave-reserved-account-keys = { path = "../reserved-account-keys", features = ["agave-unstable-api"] }
 assert_matches = { workspace = true }
 bincode = { workspace = true }
+clap = { version = "4.5.31", features = ["derive"] }
 criterion = { workspace = true }
 memoffset = { workspace = true }
 rand_chacha = { workspace = true }
@@ -142,6 +144,10 @@ harness = false
 
 [[bench]]
 name = "bench_lock_accounts"
+harness = false
+
+[[bench]]
+name = "bench_account_shared_data"
 harness = false
 
 [lints]
