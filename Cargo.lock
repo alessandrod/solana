@@ -196,6 +196,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-memory"
+version = "4.2.0-alpha.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "agave-precompiles"
 version = "4.2.0-alpha.0"
 dependencies = [
@@ -11291,6 +11301,7 @@ version = "4.2.0-alpha.0"
 dependencies = [
  "agave-banking-stage-ingress-types",
  "agave-logger",
+ "agave-memory",
  "aquamarine",
  "assert_matches",
  "crossbeam-channel",
