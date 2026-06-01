@@ -20,6 +20,7 @@ dev-context-only-utils = []
 
 [dependencies]
 agave-banking-stage-ingress-types = { workspace = true }
+agave-memory = { workspace = true }
 aquamarine = { workspace = true }
 assert_matches = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -47,6 +48,7 @@ unwrap_none = { workspace = true }
 [dev-dependencies]
 agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
 assert_matches = { workspace = true }
+jemallocator = { workspace = true }
 solana-clock = { workspace = true }
 solana-entry = { path = "../entry", features = ["agave-unstable-api"] }
 solana-hash = { workspace = true }

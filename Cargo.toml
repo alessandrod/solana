@@ -51,6 +51,7 @@ members = [
     "logger",
     "math-utils",
     "measure",
+    "memory",
     "merkle-tree",
     "metrics",
     "net-utils",
@@ -178,6 +179,7 @@ agave-geyser-plugin-interface = { path = "geyser-plugin-interface", version = "=
 agave-io-uring = { path = "io-uring", version = "=4.3.0-alpha.1", features = ["agave-unstable-api"] }
 agave-logger = { path = "logger", version = "=4.3.0-alpha.1", features = ["agave-unstable-api"] }
 agave-math-utils = { path = "math-utils", version = "=4.3.0-alpha.1", features = ["agave-unstable-api"] }
+agave-memory = { path = "memory", version = "=4.3.0-alpha.1", features = ["agave-unstable-api"] }
 agave-precompiles = { path = "precompiles", version = "=4.3.0-alpha.1", features = ["agave-unstable-api"] }
 agave-random = { path = "random", version = "=4.3.0-alpha.1", features = ["agave-unstable-api"] }
 agave-reserved-account-keys = { path = "reserved-account-keys", version = "=4.3.0-alpha.1", features = ["agave-unstable-api"] }
@@ -270,6 +272,7 @@ itertools = "0.14.0"
 jemalloc-ctl = { package = "tikv-jemalloc-ctl", version = "0.6.0", features = [
     "stats",
 ] }
+jemalloc-sys = { package = "tikv-jemalloc-sys", version = "0.6.0" }
 jemallocator = { package = "tikv-jemallocator", version = "0.6.0", features = [
     "unprefixed_malloc_on_supported_platforms",
     "stats",

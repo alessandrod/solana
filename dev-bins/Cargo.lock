@@ -263,6 +263,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-memory"
+version = "4.2.0-alpha.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+]
+
+[[package]]
 name = "agave-precompiles"
 version = "4.3.0-alpha.1"
 dependencies = [
@@ -9028,6 +9037,7 @@ name = "solana-unified-scheduler-pool"
 version = "4.3.0-alpha.1"
 dependencies = [
  "agave-banking-stage-ingress-types",
+ "agave-memory",
  "aquamarine",
  "assert_matches",
  "crossbeam-channel",
