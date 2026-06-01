@@ -14,6 +14,7 @@
 //! regarding to pooling and the actual use.
 
 use {
+    agave_memory::jemalloc::{Arena, ArenaExtentStats, ArenaStats, Decay, Jemalloc},
     assert_matches::assert_matches,
     crossbeam_channel::{
         self, Receiver, RecvError, RecvTimeoutError, SendError, Sender, never, select_biased,
@@ -23,6 +24,7 @@ use {
     log::*,
     scopeguard::defer,
     solana_clock::Slot,
+    solana_metrics::datapoint_info,
     solana_pubkey::Pubkey,
     solana_runtime::{
         installed_scheduler_pool::{
@@ -58,6 +60,10 @@ use {
 
 mod sleepless_testing;
 use crate::sleepless_testing::BuilderTracked;
+
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 // dead_code is false positive; these tuple fields are used via Debug.
 #[allow(dead_code)]
@@ -103,7 +109,8 @@ pub struct SchedulerPool<S: SpawnableScheduler<TH>, TH: TaskHandler> {
     trashed_scheduler_inners: Mutex<Vec<S::Inner>>,
     timeout_listeners: Mutex<Vec<(TimeoutListener, Instant)>>,
     common_handler_context: CommonHandlerContext,
-    block_verification_handler_count: CountOrDefault,
+    handler_thread_count: usize,
+    handler_thread_arenas: Option<Arc<HandlerThreadArenas>>,
     // weak_self could be elided by changing InstalledScheduler::take_scheduler()'s receiver to
     // Arc<Self> from &Self, because SchedulerPool is used as in the form of Arc<SchedulerPool>
     // almost always. But, this would cause wasted and noisy Arc::clone()'s at every call sites.
@@ -120,6 +127,244 @@ pub struct SchedulerPool<S: SpawnableScheduler<TH>, TH: TaskHandler> {
     scheduler_pool_sender: Sender<Weak<Self>>,
     cleaner_thread: JoinHandle<()>,
     _phantom: PhantomData<TH>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SchedulerPoolConfig {
+    pub handler_thread_arena_count: Option<usize>,
+}
+
+#[derive(Debug)]
+struct HandlerThreadArenas {
+    arenas: Vec<Arena>,
+    handler_thread_count: usize,
+}
+
+// Drop this before jemalloc's thread-local destructor runs. That flushes and disables the
+// handler thread's tcache while the thread is still assigned to its arena, avoiding jemalloc's
+// no-background-thread forced purge path when the last handler thread exits.
+#[derive(Debug)]
+struct DisableHandlerThreadTcacheOnDrop {
+    arena: Arena,
+    thread_index: usize,
+}
+
+impl Drop for DisableHandlerThreadTcacheOnDrop {
+    fn drop(&mut self) {
+        if let Err(error) = Jemalloc::disable_current_thread_tcache() {
+            warn!(
+                "failed to disable unified scheduler handler thread jemalloc tcache before thread \
+                 exit; thread_index: {}; arena_id: {}; error: {error}",
+                self.thread_index,
+                self.arena.id()
+            );
+        }
+    }
+}
+
+impl HandlerThreadArenas {
+    fn new(arena_count: usize, handler_thread_count: usize) -> Self {
+        assert!(
+            arena_count > 0,
+            "handler thread arena count must be positive"
+        );
+
+        let arenas = (0..arena_count)
+            .map(|arena_index| {
+                let arena = Jemalloc::create_arena().unwrap_or_else(|error| {
+                    panic!(
+                        "failed to create unified scheduler handler arena {arena_index}: {error}"
+                    )
+                });
+                arena.set_dirty_decay(Decay::Never).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to disable dirty decay for unified scheduler handler arena {}: \
+                         {error}",
+                        arena.id()
+                    )
+                });
+                arena.set_muzzy_decay(Decay::Never).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to disable muzzy decay for unified scheduler handler arena {}: \
+                         {error}",
+                        arena.id()
+                    )
+                });
+                arena
+                    .set_oversize_threshold(HANDLER_THREAD_ARENA_OVERSIZE_THRESHOLD)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "failed to set oversize threshold for unified scheduler handler arena \
+                             {}: {error}",
+                            arena.id()
+                        )
+                    });
+                arena
+                    .set_retain_grow_limit(HANDLER_THREAD_ARENA_RETAIN_GROW_LIMIT)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "failed to set retain grow limit for unified scheduler handler arena \
+                             {}: {error}",
+                            arena.id()
+                        )
+                    });
+                arena
+            })
+            .collect();
+
+        Self {
+            arenas,
+            handler_thread_count,
+        }
+    }
+
+    fn arena_count(&self) -> usize {
+        self.arenas.len()
+    }
+
+    fn assigned_arena(&self, thread_index: usize) -> Arena {
+        let arena_index = thread_index
+            .checked_rem(self.arena_count())
+            .expect("handler thread arena count must be positive");
+        self.arenas[arena_index]
+    }
+
+    fn bound_worker_count(&self, arena_index: usize) -> usize {
+        if arena_index >= self.arena_count() {
+            return 0;
+        }
+
+        (arena_index..self.handler_thread_count)
+            .step_by(self.arena_count())
+            .count()
+    }
+
+    fn report_stats(&self) {
+        if let Err(error) = Jemalloc::advance_epoch() {
+            warn!("failed to advance jemalloc epoch for handler arena stats: {error}");
+            return;
+        }
+
+        for (arena_index, arena) in self.arenas.iter().enumerate() {
+            match arena.stats() {
+                Ok(stats) => {
+                    self.report_arena_stats(arena_index, *arena, stats);
+                }
+                Err(error) => {
+                    warn!(
+                        "failed to read unified scheduler handler arena stats; arena_index: \
+                         {arena_index}; arena_id: {}; error: {error}",
+                        arena.id()
+                    );
+                    return;
+                }
+            }
+
+            match arena.extent_stats() {
+                Ok(extent_stats) => {
+                    self.report_arena_extent_stats(arena_index, *arena, &extent_stats);
+                }
+                Err(error) => {
+                    warn!(
+                        "failed to read unified scheduler handler arena extent stats; \
+                         arena_index: {arena_index}; arena_id: {}; error: {error}",
+                        arena.id()
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    fn report_arena_stats(&self, arena_index: usize, arena: Arena, stats: ArenaStats) {
+        datapoint_info!(
+            "unified-scheduler-handler-arena-stats",
+            ("arena_index", arena_index as i64, i64),
+            ("arena_id", arena.id().as_raw() as i64, i64),
+            ("handler_threads", self.handler_thread_count as i64, i64),
+            ("arena_count", self.arena_count() as i64, i64),
+            (
+                "bound_worker_count",
+                self.bound_worker_count(arena_index) as i64,
+                i64
+            ),
+            ("mapped_bytes", stats.mapped as i64, i64),
+            ("retained_bytes", stats.retained as i64, i64),
+            ("active_bytes", stats.active as i64, i64),
+            ("dirty_bytes", stats.dirty as i64, i64),
+            ("muzzy_bytes", stats.muzzy as i64, i64),
+            ("active_pages", stats.active_pages as i64, i64),
+            ("dirty_pages", stats.dirty_pages as i64, i64),
+            ("muzzy_pages", stats.muzzy_pages as i64, i64),
+            ("dirty_decay_ms", decay_as_millis(stats.dirty_decay), i64),
+            ("muzzy_decay_ms", decay_as_millis(stats.muzzy_decay), i64),
+            ("dirty_purge_sweeps", stats.dirty_purges.sweeps as i64, i64),
+            (
+                "dirty_purge_madvise",
+                stats.dirty_purges.madvise as i64,
+                i64
+            ),
+            (
+                "dirty_purged_pages",
+                stats.dirty_purges.purged_pages as i64,
+                i64
+            ),
+            ("muzzy_purge_sweeps", stats.muzzy_purges.sweeps as i64, i64),
+            (
+                "muzzy_purge_madvise",
+                stats.muzzy_purges.madvise as i64,
+                i64
+            ),
+            (
+                "muzzy_purged_pages",
+                stats.muzzy_purges.purged_pages as i64,
+                i64
+            ),
+        );
+    }
+
+    fn report_arena_extent_stats(
+        &self,
+        arena_index: usize,
+        arena: Arena,
+        extent_stats: &[ArenaExtentStats],
+    ) {
+        for stats in extent_stats
+            .iter()
+            .copied()
+            .filter(|stats| stats.total_bytes() > 0)
+        {
+            datapoint_info!(
+                "unified-scheduler-handler-arena-extent-bucket-stats",
+                "arena_index" => arena_index.to_string(),
+                "arena_id" => arena.id().as_raw().to_string(),
+                "extent_index" => stats.extent_index.to_string(),
+                ("handler_threads", self.handler_thread_count as i64, i64),
+                ("arena_count", self.arena_count() as i64, i64),
+                (
+                    "bound_worker_count",
+                    self.bound_worker_count(arena_index) as i64,
+                    i64
+                ),
+                ("ndirty", stats.ndirty as i64, i64),
+                ("nmuzzy", stats.nmuzzy as i64, i64),
+                ("nretained", stats.nretained as i64, i64),
+                ("dirty_bytes", stats.dirty_bytes as i64, i64),
+                ("muzzy_bytes", stats.muzzy_bytes as i64, i64),
+                ("retained_bytes", stats.retained_bytes as i64, i64),
+                ("total_extents", stats.total_extents() as i64, i64),
+                ("total_bytes", stats.total_bytes() as i64, i64),
+            );
+        }
+    }
+}
+
+fn decay_as_millis(decay: Decay) -> i64 {
+    match decay {
+        Decay::Never => -1,
+        Decay::Immediate => 0,
+        Decay::Millis(millis) => i64::try_from(millis).unwrap_or(i64::MAX),
+    }
 }
 
 #[derive(derive_more::Debug, Clone)]
@@ -176,6 +421,9 @@ pub type DefaultSchedulerPool =
 const DEFAULT_POOL_CLEANER_INTERVAL: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_POOLING_DURATION: Duration = Duration::from_secs(180);
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(12);
+const HANDLER_THREAD_ARENA_STATS_INTERVAL: Duration = Duration::from_secs(1);
+const HANDLER_THREAD_ARENA_OVERSIZE_THRESHOLD: usize = 16_777_216;
+const HANDLER_THREAD_ARENA_RETAIN_GROW_LIMIT: usize = 128 * 1024 * 1024;
 // Rough estimate of max UsageQueueLoader size in bytes:
 //   UsageFromTask * UsageQueue's capacity * DEFAULT_MAX_USAGE_QUEUE_COUNT
 //   16 bytes      * 128 items             * 262_144 entries               == 512 MiB
@@ -204,12 +452,31 @@ where
         replay_vote_sender: Option<ReplayVoteSender>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
     ) -> Arc<Self> {
+        Self::new_with_config(
+            block_verification_handler_count,
+            log_messages_bytes_limit,
+            transaction_status_sender,
+            replay_vote_sender,
+            prioritization_fee_cache,
+            SchedulerPoolConfig::default(),
+        )
+    }
+
+    pub fn new_with_config(
+        block_verification_handler_count: CountOrDefault,
+        log_messages_bytes_limit: Option<usize>,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        replay_vote_sender: Option<ReplayVoteSender>,
+        prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+        scheduler_pool_config: SchedulerPoolConfig,
+    ) -> Arc<Self> {
         Self::do_new(
             block_verification_handler_count,
             log_messages_bytes_limit,
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
+            scheduler_pool_config,
             DEFAULT_POOL_CLEANER_INTERVAL,
             DEFAULT_MAX_POOLING_DURATION,
             DEFAULT_MAX_USAGE_QUEUE_COUNT,
@@ -234,6 +501,25 @@ where
         )
     }
 
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn new_for_verification_with_config(
+        block_verification_handler_count: CountOrDefault,
+        log_messages_bytes_limit: Option<usize>,
+        transaction_status_sender: Option<TransactionStatusSender>,
+        replay_vote_sender: Option<ReplayVoteSender>,
+        prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+        scheduler_pool_config: SchedulerPoolConfig,
+    ) -> Arc<Self> {
+        Self::new_with_config(
+            block_verification_handler_count,
+            log_messages_bytes_limit,
+            transaction_status_sender,
+            replay_vote_sender,
+            prioritization_fee_cache,
+            scheduler_pool_config,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn do_new(
         block_verification_handler_count: CountOrDefault,
@@ -241,19 +527,34 @@ where
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: Option<ReplayVoteSender>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+        scheduler_pool_config: SchedulerPoolConfig,
         pool_cleaner_interval: Duration,
         max_pooling_duration: Duration,
         max_usage_queue_count: usize,
         timeout_duration: Duration,
     ) -> Arc<Self> {
+        let handler_thread_count = Self::resolve_handler_count(block_verification_handler_count);
+        let handler_thread_arenas =
+            scheduler_pool_config
+                .handler_thread_arena_count
+                .map(|arena_count| {
+                    Arc::new(HandlerThreadArenas::new(arena_count, handler_thread_count))
+                });
         let (scheduler_pool_sender, scheduler_pool_receiver) = crossbeam_channel::bounded(1);
+        let cleaner_wakeup_interval = if handler_thread_arenas.is_some() {
+            pool_cleaner_interval.min(HANDLER_THREAD_ARENA_STATS_INTERVAL)
+        } else {
+            pool_cleaner_interval
+        };
 
         let cleaner_main_loop = move || {
             info!("cleaner_main_loop: started...");
 
             let weak_scheduler_pool: Weak<Self> = scheduler_pool_receiver.recv().unwrap();
+            let mut last_cleanup = Instant::now();
+            let mut last_handler_thread_arena_stats = Instant::now();
             loop {
-                match scheduler_pool_receiver.recv_timeout(pool_cleaner_interval) {
+                match scheduler_pool_receiver.recv_timeout(cleaner_wakeup_interval) {
                     Ok(_) => unreachable!(),
                     Err(RecvTimeoutError::Disconnected | RecvTimeoutError::Timeout) => (),
                 }
@@ -265,6 +566,18 @@ where
                 };
 
                 let now = Instant::now();
+
+                if now.duration_since(last_handler_thread_arena_stats)
+                    >= HANDLER_THREAD_ARENA_STATS_INTERVAL
+                {
+                    last_handler_thread_arena_stats = now;
+                    scheduler_pool.report_handler_thread_arena_stats();
+                }
+
+                if now.duration_since(last_cleanup) < pool_cleaner_interval {
+                    continue;
+                }
+                last_cleanup = now;
 
                 let idle_inner_count = {
                     // Pre-allocate rather large capacity to avoid reallocation inside the lock.
@@ -350,7 +663,8 @@ where
                 replay_vote_sender,
                 prioritization_fee_cache,
             },
-            block_verification_handler_count,
+            handler_thread_count,
+            handler_thread_arenas,
             weak_self: weak_self.clone(),
             next_scheduler_id: AtomicSchedulerId::default(),
             max_usage_queue_count,
@@ -434,13 +748,21 @@ where
     }
 
     fn create_handler_context(&self) -> HandlerContext {
-        let thread_count = self.block_verification_handler_count;
-
-        let thread_count = thread_count.unwrap_or(Self::default_handler_count());
-        assert!(thread_count >= 1);
         self.common_handler_context
             .clone()
-            .into_handler_context(thread_count)
+            .into_handler_context(self.handler_thread_count)
+    }
+
+    fn report_handler_thread_arena_stats(&self) {
+        if let Some(handler_thread_arenas) = &self.handler_thread_arenas {
+            handler_thread_arenas.report_stats();
+        }
+    }
+
+    fn resolve_handler_count(handler_count: CountOrDefault) -> usize {
+        let handler_count = handler_count.unwrap_or(Self::default_handler_count());
+        assert!(handler_count >= 1);
+        handler_count
     }
 
     pub fn default_handler_count() -> usize {
@@ -1481,7 +1803,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             }
         };
 
-        let handler_main_loop = || {
+        let handler_main_loop = |thread_index: usize, assigned_arena: Option<Arena>| {
             let handler_context = handler_context.clone();
             let mut runnable_task_receiver = runnable_task_receiver.clone();
             let finished_blocked_task_sender = finished_blocked_task_sender.clone();
@@ -1496,6 +1818,31 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             //    `select_biased!`, which are sent from `.send_chained_channel()` in the scheduler
             //    thread for all-but-initial sessions.
             move || {
+                let _disable_tcache_on_exit = if let Some(arena) = assigned_arena {
+                    if let Err(error) = arena.bind_current_thread_permanently() {
+                        let current_thread = thread::current();
+                        error!(
+                            "failed to bind unified scheduler handler thread to jemalloc arena; \
+                             thread_index: {thread_index}; arena_id: {}; thread: \
+                             {current_thread:?}; error: {error}",
+                            arena.id()
+                        );
+                        let _ = finished_idle_task_sender.send(Err(HandlerPanicked));
+                        panic!(
+                            "failed to bind unified scheduler handler thread {thread_index} to \
+                             jemalloc arena {}: {error}",
+                            arena.id()
+                        );
+                    }
+
+                    Some(DisableHandlerThreadTcacheOnDrop {
+                        arena,
+                        thread_index,
+                    })
+                } else {
+                    None
+                };
+
                 loop {
                     let (task, sender) = select_biased! {
                         recv(runnable_task_receiver.for_select()) -> message => {
@@ -1557,12 +1904,16 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                 .unwrap(),
         );
 
+        let handler_thread_arenas = self.pool.handler_thread_arenas.clone();
         self.handler_threads = (0..handler_context.thread_count)
             .map({
                 |thx| {
+                    let assigned_arena = handler_thread_arenas
+                        .as_ref()
+                        .map(|arenas| arenas.assigned_arena(thx));
                     thread::Builder::new()
                         .name(format!("solScHandle{mode_char}{thx:02}"))
-                        .spawn_tracked(handler_main_loop())
+                        .spawn_tracked(handler_main_loop(thx, assigned_arena))
                         .unwrap()
                 }
             })
@@ -1875,6 +2226,7 @@ mod tests {
     use {
         super::*,
         crate::sleepless_testing,
+        agave_memory::jemalloc::{Decay, Jemalloc},
         assert_matches::assert_matches,
         solana_clock::Slot,
         solana_hash::Hash,
@@ -1917,12 +2269,40 @@ mod tests {
             max_usage_queue_count: usize,
             timeout_duration: Duration,
         ) -> Arc<Self> {
+            Self::do_new_for_verification_with_config(
+                block_verification_handler_count,
+                log_messages_bytes_limit,
+                transaction_status_sender,
+                replay_vote_sender,
+                prioritization_fee_cache,
+                SchedulerPoolConfig::default(),
+                pool_cleaner_interval,
+                max_pooling_duration,
+                max_usage_queue_count,
+                timeout_duration,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn do_new_for_verification_with_config(
+            block_verification_handler_count: CountOrDefault,
+            log_messages_bytes_limit: Option<usize>,
+            transaction_status_sender: Option<TransactionStatusSender>,
+            replay_vote_sender: Option<ReplayVoteSender>,
+            prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+            scheduler_pool_config: SchedulerPoolConfig,
+            pool_cleaner_interval: Duration,
+            max_pooling_duration: Duration,
+            max_usage_queue_count: usize,
+            timeout_duration: Duration,
+        ) -> Arc<Self> {
             Self::do_new(
                 block_verification_handler_count,
                 log_messages_bytes_limit,
                 transaction_status_sender,
                 replay_vote_sender,
                 prioritization_fee_cache,
+                scheduler_pool_config,
                 pool_cleaner_interval,
                 max_pooling_duration,
                 max_usage_queue_count,
@@ -1978,6 +2358,107 @@ mod tests {
         assert_eq!((Arc::strong_count(&pool), Arc::weak_count(&pool)), (1, 2));
         let debug = format!("{pool:#?}");
         assert!(!debug.is_empty());
+    }
+
+    #[test]
+    fn test_handler_thread_arenas_round_robin_assignment() {
+        let arenas = HandlerThreadArenas::new(3, 8);
+        let arena_ids: Vec<_> = arenas.arenas.iter().map(|arena| arena.id()).collect();
+        let assigned_arena_ids: Vec<_> = (0..8)
+            .map(|thread_index| arenas.assigned_arena(thread_index).id())
+            .collect();
+
+        assert_eq!(
+            assigned_arena_ids,
+            vec![
+                arena_ids[0],
+                arena_ids[1],
+                arena_ids[2],
+                arena_ids[0],
+                arena_ids[1],
+                arena_ids[2],
+                arena_ids[0],
+                arena_ids[1],
+            ]
+        );
+        assert_eq!(arenas.bound_worker_count(0), 3);
+        assert_eq!(arenas.bound_worker_count(1), 3);
+        assert_eq!(arenas.bound_worker_count(2), 2);
+    }
+
+    #[test]
+    fn test_handler_thread_arenas_disable_decay() {
+        let arenas = HandlerThreadArenas::new(2, 4);
+
+        for arena in arenas.arenas {
+            assert_eq!(arena.dirty_decay().unwrap(), Decay::Never);
+            assert_eq!(arena.muzzy_decay().unwrap(), Decay::Never);
+            assert_eq!(
+                arena.oversize_threshold().unwrap(),
+                HANDLER_THREAD_ARENA_OVERSIZE_THRESHOLD
+            );
+            assert_eq!(
+                arena.retain_grow_limit().unwrap(),
+                HANDLER_THREAD_ARENA_RETAIN_GROW_LIMIT
+            );
+        }
+    }
+
+    #[test]
+    fn test_handler_thread_arena_binding() {
+        let arenas = HandlerThreadArenas::new(1, 1);
+        let arena = arenas.assigned_arena(0);
+
+        std::thread::spawn(move || {
+            arena.bind_current_thread_permanently().unwrap();
+            assert_eq!(Jemalloc::current_thread_arena().unwrap(), arena.id());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn test_handler_thread_tcache_drop_guard_avoids_purge_on_thread_exit() {
+        let arenas = HandlerThreadArenas::new(1, 1);
+        let arena = arenas.assigned_arena(0);
+
+        let stats_before_thread_exit = std::thread::spawn(move || {
+            arena.bind_current_thread_permanently().unwrap();
+            let _disable_tcache_on_exit = DisableHandlerThreadTcacheOnDrop {
+                arena,
+                thread_index: 0,
+            };
+
+            const DIRTY_BYTES: usize = 8 * 1024 * 1024;
+            let allocation = vec![0u8; DIRTY_BYTES];
+            assert_eq!(allocation.len(), DIRTY_BYTES);
+            drop(allocation);
+
+            Jemalloc::advance_epoch().unwrap();
+            let stats = arena.stats().unwrap();
+            assert_eq!(stats.dirty_decay, Decay::Never);
+            assert_eq!(stats.muzzy_decay, Decay::Never);
+            assert!(
+                stats.dirty_pages > 0,
+                "test requires dirty pages before handler thread exit"
+            );
+
+            stats
+        })
+        .join()
+        .unwrap();
+
+        Jemalloc::advance_epoch().unwrap();
+        let stats_after_thread_exit = arena.stats().unwrap();
+
+        assert_eq!(
+            stats_after_thread_exit.dirty_purges,
+            stats_before_thread_exit.dirty_purges
+        );
+        assert_eq!(
+            stats_after_thread_exit.muzzy_purges,
+            stats_before_thread_exit.muzzy_purges
+        );
     }
 
     #[test]
