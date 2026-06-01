@@ -1,0 +1,31 @@
+[package]
+name = "agave-memory"
+description = "Agave memory utilities"
+documentation = "https://docs.rs/agave-memory"
+version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lib]
+crate-type = ["lib"]
+name = "agave_memory"
+
+[features]
+agave-unstable-api = []
+
+[dependencies]
+jemalloc-ctl = { workspace = true }
+jemalloc-sys = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+jemallocator = { workspace = true }
+
+[lints]
+workspace = true

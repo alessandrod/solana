@@ -877,6 +877,12 @@ pub fn execute(
             usize
         )
         .ok(),
+        unified_scheduler_handler_arenas: value_t!(
+            matches,
+            "unified_scheduler_handler_arenas",
+            usize
+        )
+        .ok(),
         block_production_method: value_t_or_exit!(
             matches,
             "block_production_method",
