@@ -145,7 +145,7 @@ use {
     solana_time_utils::timestamp,
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
     solana_turbine::{self, broadcast_stage::BroadcastStageType},
-    solana_unified_scheduler_pool::DefaultSchedulerPool,
+    solana_unified_scheduler_pool::{DefaultSchedulerPool, SchedulerPoolConfig},
     solana_validator_exit::Exit,
     solana_vote_program::vote_state::{VoteStateV4, handler::VoteStateHandler},
     std::{
@@ -387,6 +387,7 @@ pub struct ValidatorConfig {
     pub generator_config: Option<GeneratorConfig>,
     pub use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup,
     pub unified_scheduler_handler_threads: Option<usize>,
+    pub unified_scheduler_handler_arenas: Option<usize>,
     pub ip_echo_server_threads: NonZeroUsize,
     pub rayon_global_threads: NonZeroUsize,
     pub replay_forks_threads: NonZeroUsize,
@@ -471,6 +472,7 @@ impl ValidatorConfig {
             generator_config: None,
             use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::default(),
             unified_scheduler_handler_threads: None,
+            unified_scheduler_handler_arenas: None,
             // Fix threadpools to small and reasonable sizes; unit tests should
             // not be creating excessive load and benches can configure more
             ip_echo_server_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
@@ -1104,12 +1106,15 @@ impl Validator {
         }
         let banking_tracer_channels = banking_tracer.create_channels();
 
-        let scheduler_pool = DefaultSchedulerPool::new(
+        let scheduler_pool = DefaultSchedulerPool::new_with_config(
             config.unified_scheduler_handler_threads,
             config.runtime_config.log_messages_bytes_limit,
             transaction_status_sender.clone(),
             Some(replay_vote_sender.clone()),
             prioritization_fee_cache.clone(),
+            SchedulerPoolConfig {
+                handler_thread_arena_count: config.unified_scheduler_handler_arenas,
+            },
         );
         bank_forks
             .write()
