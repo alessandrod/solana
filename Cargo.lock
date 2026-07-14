@@ -582,6 +582,7 @@ dependencies = [
  "libc",
  "log",
  "nix",
+ "solana-metrics",
  "thiserror 2.0.18",
 ]
 

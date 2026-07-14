@@ -29,7 +29,7 @@ use {
             atomic::{AtomicUsize, Ordering},
         },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -341,6 +341,8 @@ impl<U: Umem> TxLoop<U> {
         // timeout commits any partial batch so low rate traffic is not held indefinitely.
         const BATCH_SIZE: usize = 64;
 
+        const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(2);
+
         let TxLoop {
             cpu_id,
             src_mac,
@@ -359,8 +361,26 @@ impl<U: Umem> TxLoop<U> {
         // How many descriptors are written into the TX ring but not yet committed.
         let mut written_uncommitted = 0;
 
+        let queue_id = socket.queue().id();
+        let mut processing_time = Duration::ZERO;
+        let mut metrics_report_start = Instant::now();
         let mut timeouts = 0;
         loop {
+            let mut processing_start = Instant::now();
+            let sample_duration = processing_start.duration_since(metrics_report_start);
+            if sample_duration >= METRICS_REPORT_INTERVAL {
+                solana_metrics::datapoint_info!(
+                    "xdp-tx-loop",
+                    "queue_id" => queue_id.0.to_string(),
+                    "cpu_id" => cpu_id.to_string(),
+                    ("processing_time_us", processing_time.as_micros(), i64),
+                    ("sample_duration_us", sample_duration.as_micros(), i64),
+                );
+                processing_time = Duration::ZERO;
+                metrics_report_start = Instant::now();
+                processing_start = metrics_report_start;
+            }
+
             let item = match receiver.try_recv() {
                 Ok(item) => {
                     timeouts = 0;
@@ -615,6 +635,7 @@ impl<U: Umem> TxLoop<U> {
                 }
             }
             drop_item(item);
+            processing_time = processing_time.saturating_add(processing_start.elapsed());
         }
         commit_pending(&mut ring, &mut written_uncommitted);
         kick(&ring);
