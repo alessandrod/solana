@@ -11,6 +11,7 @@ use {
     solana_hash::Hash,
     std::{
         collections::{HashMap, HashSet, hash_map::Entry},
+        mem,
         num::{NonZero, NonZeroUsize},
     },
 };
@@ -19,6 +20,8 @@ use {
 // blockhashes because we automatically reject txs that use older blockhashes so we don't need to
 // track those explicitly.
 const MAX_ROOT_ENTRIES: usize = MAX_RECENT_BLOCKHASHES;
+
+const KEY_MAP_FREELIST_CAPACITY: usize = 10;
 
 // Only store 20 bytes of the tx keys processed to save some memory.
 const CACHED_KEY_SIZE: usize = 20;
@@ -30,6 +33,144 @@ pub type ForkStatus<T> = SmallVec<[(Slot, T); 1]>;
 pub(crate) type KeySlice = [u8; CACHED_KEY_SIZE];
 
 type KeyMap<T> = HashMap<KeySlice, ForkStatus<T>>;
+
+// Reuse the allocations of recently purged key maps without retaining an unbounded amount of
+// memory.
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug)]
+struct KeyMapFreelist<T> {
+    maps: Vec<KeyMap<T>>,
+    metrics: KeyMapFreelistMetrics,
+}
+
+/// Freelist activity accumulated between root reports.
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Default)]
+pub(crate) struct KeyMapFreelistMetrics {
+    hits: usize,
+    misses: usize,
+    reused_capacity_elems: usize,
+    key_maps_purged: usize,
+    key_maps_recycled: usize,
+    key_maps_dropped: usize,
+    purged_capacity_elems: usize,
+    dropped_capacity_elems: usize,
+    max_purged_map_capacity_elems: usize,
+    freelist_len_before_purge: usize,
+    freelist_len_after_purge: usize,
+    freelist_capacity_elems_after_purge: usize,
+    max_retained_map_capacity_elems: usize,
+}
+
+impl KeyMapFreelistMetrics {
+    pub(crate) fn report(&self, slot: Slot) {
+        datapoint_info!(
+            "bank-status_cache",
+            ("slot", slot, i64),
+            ("key_map_freelist_hits", self.hits, i64),
+            ("key_map_freelist_misses", self.misses, i64),
+            (
+                "key_map_reused_capacity_elems",
+                self.reused_capacity_elems,
+                i64
+            ),
+            ("key_maps_purged", self.key_maps_purged, i64),
+            ("key_maps_recycled", self.key_maps_recycled, i64),
+            ("key_maps_dropped", self.key_maps_dropped, i64),
+            (
+                "purged_key_map_capacity_elems",
+                self.purged_capacity_elems,
+                i64
+            ),
+            (
+                "dropped_key_map_capacity_elems",
+                self.dropped_capacity_elems,
+                i64
+            ),
+            (
+                "max_purged_key_map_capacity_elems",
+                self.max_purged_map_capacity_elems,
+                i64
+            ),
+            (
+                "key_map_freelist_len_before_purge",
+                self.freelist_len_before_purge,
+                i64
+            ),
+            (
+                "key_map_freelist_len_after_purge",
+                self.freelist_len_after_purge,
+                i64
+            ),
+            (
+                "key_map_freelist_capacity_elems_after_purge",
+                self.freelist_capacity_elems_after_purge,
+                i64
+            ),
+            (
+                "max_retained_key_map_capacity_elems",
+                self.max_retained_map_capacity_elems,
+                i64
+            ),
+        );
+    }
+}
+
+impl<T> Default for KeyMapFreelist<T> {
+    fn default() -> Self {
+        Self {
+            maps: Vec::with_capacity(KEY_MAP_FREELIST_CAPACITY),
+            metrics: KeyMapFreelistMetrics::default(),
+        }
+    }
+}
+
+impl<T> Clone for KeyMapFreelist<T> {
+    fn clone(&self) -> Self {
+        // The freelist is transient state; cloning its allocations would only increase memory use.
+        Self::default()
+    }
+}
+
+impl<T> KeyMapFreelist<T> {
+    fn push(&mut self, mut map: KeyMap<T>) {
+        let capacity = map.capacity();
+        if capacity == 0 {
+            return;
+        }
+
+        self.metrics.key_maps_purged = self.metrics.key_maps_purged.saturating_add(1);
+        self.metrics.purged_capacity_elems =
+            self.metrics.purged_capacity_elems.saturating_add(capacity);
+        self.metrics.max_purged_map_capacity_elems =
+            self.metrics.max_purged_map_capacity_elems.max(capacity);
+
+        if self.maps.len() >= KEY_MAP_FREELIST_CAPACITY {
+            self.metrics.key_maps_dropped = self.metrics.key_maps_dropped.saturating_add(1);
+            self.metrics.dropped_capacity_elems =
+                self.metrics.dropped_capacity_elems.saturating_add(capacity);
+            return;
+        }
+
+        map.clear();
+        self.maps.push(map);
+        self.metrics.key_maps_recycled = self.metrics.key_maps_recycled.saturating_add(1);
+    }
+
+    fn pop(&mut self) -> KeyMap<T> {
+        if let Some(map) = self.maps.pop() {
+            self.metrics.hits = self.metrics.hits.saturating_add(1);
+            self.metrics.reused_capacity_elems = self
+                .metrics
+                .reused_capacity_elems
+                .saturating_add(map.capacity());
+            map
+        } else {
+            self.metrics.misses = self.metrics.misses.saturating_add(1);
+            KeyMap::default()
+        }
+    }
+}
 
 // Map of Hash and status
 pub type Status<T> =
@@ -57,6 +198,7 @@ pub struct StatusCache<T: Serialize + Clone> {
     // slot_deltas[slot][blockhash] => [(tx_key, tx_result), ...] used to serialize for snapshots
     // and to rebuild cache[blockhash][tx_key] from a snapshot
     slot_deltas: SlotDeltaMap<T>,
+    key_map_freelist: KeyMapFreelist<T>,
 }
 
 impl<T: Serialize + Clone> Default for StatusCache<T> {
@@ -67,6 +209,7 @@ impl<T: Serialize + Clone> Default for StatusCache<T> {
             roots: HashSet::from([0]),
             max_root_entries: NonZero::new(MAX_ROOT_ENTRIES).unwrap(),
             slot_deltas: HashMap::default(),
+            key_map_freelist: KeyMapFreelist::default(),
         }
     }
 }
@@ -217,10 +360,10 @@ impl<T: Serialize + Clone> StatusCache<T> {
         let max_key_index = key.as_ref().len().saturating_sub(CACHED_KEY_SIZE + 1);
 
         // Get the cache entry for this blockhash.
-        let (max_slot, key_index, hash_map) = self
-            .cache
+        let (cache, key_map_freelist) = (&mut self.cache, &mut self.key_map_freelist);
+        let (max_slot, key_index, hash_map) = cache
             .entry(*transaction_blockhash)
-            .or_insert_with(|| (slot, 0, HashMap::new()));
+            .or_insert_with(|| (slot, 0, key_map_freelist.pop()));
 
         // Update the max slot observed to contain txs using this blockhash.
         *max_slot = std::cmp::max(slot, *max_slot);
@@ -251,9 +394,33 @@ impl<T: Serialize + Clone> StatusCache<T> {
             let cutoff = *cutoff;
 
             self.roots.retain(|root| *root > cutoff);
-            self.cache.retain(|_, (fork, _, _)| *fork > cutoff);
+            let (cache, key_map_freelist) = (&mut self.cache, &mut self.key_map_freelist);
+            key_map_freelist.metrics.freelist_len_before_purge = key_map_freelist.maps.len();
+            cache.retain(|_, (fork, _, key_map)| {
+                if *fork > cutoff {
+                    true
+                } else {
+                    key_map_freelist.push(mem::take(key_map));
+                    false
+                }
+            });
+            key_map_freelist.metrics.freelist_len_after_purge = key_map_freelist.maps.len();
+            let (capacity_elems, max_map_capacity_elems) =
+                key_map_freelist
+                    .maps
+                    .iter()
+                    .fold((0usize, 0usize), |(total, max), map| {
+                        let capacity = map.capacity();
+                        (total.saturating_add(capacity), max.max(capacity))
+                    });
+            key_map_freelist.metrics.freelist_capacity_elems_after_purge = capacity_elems;
+            key_map_freelist.metrics.max_retained_map_capacity_elems = max_map_capacity_elems;
             self.slot_deltas.retain(|slot, _| *slot > cutoff);
         }
+    }
+
+    pub(crate) fn take_key_map_freelist_metrics(&mut self) -> KeyMapFreelistMetrics {
+        mem::take(&mut self.key_map_freelist.metrics)
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -316,10 +483,10 @@ impl<T: Serialize + Clone> StatusCache<T> {
         key_slice: [u8; CACHED_KEY_SIZE],
         res: T,
     ) {
-        let hash_map =
-            self.cache
-                .entry(*transaction_blockhash)
-                .or_insert((slot, key_index, HashMap::new()));
+        let (cache, key_map_freelist) = (&mut self.cache, &mut self.key_map_freelist);
+        let hash_map = cache
+            .entry(*transaction_blockhash)
+            .or_insert_with(|| (slot, key_index, key_map_freelist.pop()));
         hash_map.0 = std::cmp::max(slot, hash_map.0);
 
         let forks = hash_map.2.entry(key_slice).or_default();
@@ -471,6 +638,93 @@ mod tests {
             status_cache.add_root(i as u64);
         }
         assert_eq!(status_cache.get_status(sig, &blockhash, &ancestors), None);
+    }
+
+    #[test]
+    fn test_key_map_freelist_reuses_allocation() {
+        let mut status_cache = BankStatusCache::default();
+        status_cache.set_max_root_entries(NonZeroUsize::new(1).unwrap());
+
+        let old_blockhash = Hash::new_unique();
+        let old_key = Hash::new_unique();
+        status_cache.insert(&old_blockhash, old_key, 0, ());
+        for _ in 0..31 {
+            status_cache.insert(&old_blockhash, Hash::new_unique(), 0, ());
+        }
+        let old_capacity = status_cache.cache[&old_blockhash].2.capacity();
+
+        status_cache.add_root(1);
+        assert!(!status_cache.cache.contains_key(&old_blockhash));
+        assert_eq!(status_cache.key_map_freelist.maps.len(), 1);
+        assert!(status_cache.key_map_freelist.maps[0].is_empty());
+        assert_eq!(
+            status_cache.key_map_freelist.maps[0].capacity(),
+            old_capacity
+        );
+
+        let new_blockhash = Hash::new_unique();
+        let new_key = Hash::new_unique();
+        status_cache.insert(&new_blockhash, new_key, 1, ());
+        assert!(status_cache.key_map_freelist.maps.is_empty());
+        assert_eq!(
+            status_cache.cache[&new_blockhash].2.capacity(),
+            old_capacity
+        );
+        assert_eq!(
+            status_cache.get_status(old_key, &new_blockhash, &Ancestors::default()),
+            None
+        );
+        assert_eq!(
+            status_cache.get_status(new_key, &new_blockhash, &Ancestors::default()),
+            Some((1, ()))
+        );
+
+        let metrics = status_cache.take_key_map_freelist_metrics();
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.reused_capacity_elems, old_capacity);
+        assert_eq!(metrics.key_maps_purged, 1);
+        assert_eq!(metrics.key_maps_recycled, 1);
+        assert_eq!(metrics.key_maps_dropped, 0);
+        assert_eq!(metrics.purged_capacity_elems, old_capacity);
+        assert_eq!(metrics.dropped_capacity_elems, 0);
+        assert_eq!(metrics.max_purged_map_capacity_elems, old_capacity);
+        assert_eq!(metrics.freelist_len_before_purge, 0);
+        assert_eq!(metrics.freelist_len_after_purge, 1);
+        assert_eq!(metrics.freelist_capacity_elems_after_purge, old_capacity);
+        assert_eq!(metrics.max_retained_map_capacity_elems, old_capacity);
+    }
+
+    #[test]
+    fn test_key_map_freelist_capacity() {
+        let mut status_cache = BankStatusCache::default();
+        status_cache.set_max_root_entries(NonZeroUsize::new(1).unwrap());
+
+        for _ in 0..KEY_MAP_FREELIST_CAPACITY + 1 {
+            status_cache.insert(&Hash::new_unique(), Hash::new_unique(), 0, ());
+        }
+        status_cache.add_root(1);
+
+        assert!(status_cache.cache.is_empty());
+        assert_eq!(
+            status_cache.key_map_freelist.maps.len(),
+            KEY_MAP_FREELIST_CAPACITY
+        );
+        assert!(
+            status_cache
+                .key_map_freelist
+                .maps
+                .iter()
+                .all(HashMap::is_empty)
+        );
+
+        let metrics = status_cache.take_key_map_freelist_metrics();
+        assert_eq!(metrics.key_maps_purged, KEY_MAP_FREELIST_CAPACITY + 1);
+        assert_eq!(metrics.key_maps_recycled, KEY_MAP_FREELIST_CAPACITY);
+        assert_eq!(metrics.key_maps_dropped, 1);
+        assert_eq!(metrics.freelist_len_before_purge, 0);
+        assert_eq!(metrics.freelist_len_after_purge, KEY_MAP_FREELIST_CAPACITY);
+        assert!(metrics.dropped_capacity_elems > 0);
     }
 
     #[test]
