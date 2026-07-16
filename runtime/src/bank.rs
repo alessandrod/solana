@@ -3267,11 +3267,14 @@ impl Bank {
         *self.rc.parent.write().unwrap() = None;
 
         let mut squash_cache_time = Measure::start("squash_cache_time");
-        self.status_cache
-            .write()
-            .unwrap()
-            .add_roots(roots.iter().copied());
+        let key_map_freelist_metrics = {
+            let mut status_cache = self.status_cache.write().unwrap();
+            status_cache.add_roots(roots.iter().copied());
+            status_cache.take_key_map_freelist_metrics()
+        };
         squash_cache_time.stop();
+
+        key_map_freelist_metrics.report(self.slot());
 
         SquashTiming {
             squash_accounts_ms: squash_accounts_time.as_ms(),
