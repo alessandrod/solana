@@ -228,5 +228,9 @@ name = "prioritization_fee_cache"
 name = "epoch_turnover"
 harness = false
 
+[[bench]]
+name = "status_cache_add_roots"
+harness = false
+
 [lints]
 workspace = true
