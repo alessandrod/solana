@@ -623,6 +623,9 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+[profile.bench]
+debug = 2
+
 [patch.crates-io]
 # for details, see https://github.com/anza-xyz/crossbeam/commit/5ee1c6ec671d94db14ed9238eb99e59a84555aad
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "5ee1c6ec671d94db14ed9238eb99e59a84555aad" }
