@@ -233,7 +233,7 @@ impl<J: WorkerJob> WorkerPool<J> {
                 let job_receiver = job_receiver.clone();
                 thread::Builder::new()
                     .name(format!("{thread_name_prefix}{index:02}"))
-                    .stack_size(2 * 1024 * 1024)
+                    .stack_size(8 * 1024 * 1024)
                     .spawn(move || {
                         while let Ok(job) = job_receiver.recv() {
                             job.run();
