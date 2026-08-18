@@ -990,6 +990,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-wait"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a55b94919229f2c42292fd71ffa4b75e83193bffdd77b1e858cd55fd2d0b0ea8"
+dependencies = [
+ "libc",
+ "windows-sys 0.42.0",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1751,7 +1761,7 @@ dependencies = [
  "encode_unicode",
  "libc",
  "unicode-width 0.2.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4013,7 +4023,7 @@ checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
 dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5197,7 +5207,7 @@ checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
 dependencies = [
  "libc",
  "rtoolbox",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7187,12 +7197,14 @@ dependencies = [
  "agave-votor-messages",
  "anyhow",
  "assert_matches",
+ "atomic-wait",
  "bitflags 2.13.1",
  "bytes",
  "bzip2",
  "chrono",
  "chrono-humanize",
  "crossbeam-channel",
+ "crossbeam-utils",
  "dashmap",
  "eager",
  "fs_extra",
