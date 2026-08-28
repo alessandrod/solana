@@ -45,15 +45,24 @@ static_assertions = { workspace = true }
 [dev-dependencies]
 agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
 assert_matches = { workspace = true }
+bencher = { workspace = true }
 jemallocator = { workspace = true }
+solana-account = { workspace = true }
 solana-clock = { workspace = true }
 solana-entry = { path = "../entry", features = ["agave-unstable-api"] }
+solana-genesis-config = { workspace = true }
 solana-hash = { workspace = true }
 solana-keypair = { workspace = true }
 solana-runtime = { path = "../runtime", features = ["agave-unstable-api", "dev-context-only-utils"] }
+solana-sdk-ids = { workspace = true }
+solana-signer = { workspace = true }
 solana-system-transaction = { workspace = true }
 solana-unified-scheduler-pool = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }
 test-case = { workspace = true }
+
+[[bench]]
+name = "serialized_transactions"
+harness = false
 
 [lints]
 workspace = true

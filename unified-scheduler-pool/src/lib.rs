@@ -913,13 +913,15 @@ impl TaskHandler for DefaultTaskHandler {
 struct ExecutedTask {
     task: Task,
     result_with_timings: ResultWithTimings,
+    handler_index: usize,
 }
 
 impl ExecutedTask {
-    fn new_boxed(task: Task) -> Box<Self> {
+    fn new_boxed(task: Task, handler_index: usize) -> Box<Self> {
         Box::new(Self {
             task,
             result_with_timings: initialized_result_with_timings(),
+            handler_index,
         })
     }
 
@@ -1320,6 +1322,12 @@ struct ThreadManager<S: SpawnableScheduler<TH>, TH: TaskHandler> {
 struct HandlerPanicked;
 type HandlerResult = std::result::Result<Box<ExecutedTask>, HandlerPanicked>;
 
+#[derive(Debug)]
+enum HandlerContinuation {
+    Execute(Task),
+    Release,
+}
+
 impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
     fn new(pool: Arc<SchedulerPool<S, TH>>) -> Self {
         let (new_task_sender, new_task_receiver) = crossbeam_channel::unbounded();
@@ -1449,8 +1457,14 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         // around tasks, by creating 2 channels (one for to-be-handled tasks from the scheduler to
         // the handlers and the other for finished tasks from the handlers to the scheduler).
         // Furthermore, this pair of channels is duplicated to work as a primitive 2-level priority
-        // queue, totalling 4 channels. Note that the two scheduler-to-handler channels are managed
-        // behind chained_channel to avoid race conditions relating to contexts.
+        // queue, totalling 4 shared channels. Note that the two scheduler-to-handler channels are
+        // managed behind chained_channel to avoid race conditions relating to contexts.
+        //
+        // Each handler also has a private continuation channel. After finishing a task from the
+        // blocked-task pathway, the handler waits for the scheduler to either return the next
+        // unblocked task directly or tell it to resume polling the shared channels. This keeps
+        // serialized runs on one handler after their first shared-channel dispatch without putting
+        // the normal non-conflicting path behind a scheduler acknowledgement.
         //
         // This quasi-priority-queue arrangement is desired as an optimization to prioritize
         // blocked tasks.
@@ -1531,6 +1545,12 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             crossbeam_channel::unbounded::<HandlerResult>();
         let (finished_idle_task_sender, finished_idle_task_receiver) =
             crossbeam_channel::unbounded::<HandlerResult>();
+        // A handler can have only one outstanding completion while it waits for its response, so
+        // capacity one is sufficient and lets the scheduler reply without blocking.
+        let handler_count = handler_context.thread_count;
+        let (continuation_senders, continuation_receivers): (Vec<_>, Vec<_>) = (0..handler_count)
+            .map(|_| crossbeam_channel::bounded::<HandlerContinuation>(1))
+            .unzip();
 
         assert_matches!(self.session_result_with_timings, None);
 
@@ -1541,6 +1561,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         // 4. the handler thread processes the dispatched task.
         // 5. the handler thread reply back to the scheduler thread as an executed task.
         // 6. the scheduler thread post-processes the executed task.
+        // 7. for a previously-blocked task, the scheduler replies directly to the same handler.
         let scheduler_main_loop = {
             let handler_context = handler_context.clone_for_scheduler_thread();
             let session_result_sender = self.session_result_sender.clone();
@@ -1634,6 +1655,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                                 let Ok(executed_task) = handler_result else {
                                     break 'nonaborted_main_loop;
                                 };
+                                let handler_index = executed_task.handler_index;
                                 state_machine.deschedule_task(&executed_task.task);
 
                                 if Self::abort_or_accumulate_result_with_timings(
@@ -1642,6 +1664,19 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                                 ) {
                                     break 'nonaborted_main_loop;
                                 }
+
+                                // The handler is waiting on its private channel after reporting a
+                                // blocked task. Return one runnable task directly when possible;
+                                // otherwise release the handler to poll the shared channels.
+                                let continuation = state_machine
+                                    .schedule_next_unblocked_task()
+                                    .map_or(
+                                        HandlerContinuation::Release,
+                                        HandlerContinuation::Execute,
+                                    );
+                                continuation_senders[handler_index]
+                                    .try_send(continuation)
+                                    .expect("handler continuation channel must be empty and alive");
                             },
                             recv(dummy_unblocked_task_receiver) -> dummy => {
                                 assert_matches!(dummy, Err(RecvError));
@@ -1808,6 +1843,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             let mut runnable_task_receiver = runnable_task_receiver.clone();
             let finished_blocked_task_sender = finished_blocked_task_sender.clone();
             let finished_idle_task_sender = finished_idle_task_sender.clone();
+            let continuation_receiver = continuation_receivers[thread_index].clone();
 
             // The following loop maintains and updates SchedulingContext as its
             // externally-provided state for each session in this way:
@@ -1843,26 +1879,32 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                     None
                 };
 
+                // A direct continuation belongs to the current session: a session cannot finish
+                // while a scheduled continuation remains active in the state machine.
+                let mut continued_task = None;
                 loop {
-                    let (task, sender) = select_biased! {
-                        recv(runnable_task_receiver.for_select()) -> message => {
-                            let Ok(message) = message else {
-                                break;
-                            };
-                            if let Some(task) = runnable_task_receiver.after_select(message) {
-                                (task, &finished_blocked_task_sender)
-                            } else {
-                                continue;
+                    let (task, sender, await_continuation) = match continued_task.take() {
+                        Some(task) => (task, &finished_blocked_task_sender, true),
+                        None => select_biased! {
+                            recv(runnable_task_receiver.for_select()) -> message => {
+                                let Ok(message) = message else {
+                                    break;
+                                };
+                                if let Some(task) = runnable_task_receiver.after_select(message) {
+                                    (task, &finished_blocked_task_sender, true)
+                                } else {
+                                    continue;
+                                }
+                            },
+                            recv(runnable_task_receiver.aux_for_select()) -> task => {
+                                if let Ok(task) = task {
+                                    (task, &finished_idle_task_sender, false)
+                                } else {
+                                    runnable_task_receiver.never_receive_from_aux();
+                                    continue;
+                                }
                             }
                         },
-                        recv(runnable_task_receiver.aux_for_select()) -> task => {
-                            if let Ok(task) = task {
-                                (task, &finished_idle_task_sender)
-                            } else {
-                                runnable_task_receiver.never_receive_from_aux();
-                                continue;
-                            }
-                        }
                     };
                     defer! {
                         if !thread::panicking() {
@@ -1881,7 +1923,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                             warn!("failed to notify a panic from {current_thread:?}");
                         }
                     }
-                    let mut task = ExecutedTask::new_boxed(task);
+                    let mut task = ExecutedTask::new_boxed(task, thread_index);
                     Self::execute_task_with_handler(
                         runnable_task_receiver.context(),
                         &mut task,
@@ -1890,6 +1932,16 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                     if sender.send(Ok(task)).is_err() {
                         warn!("handler_thread: scheduler thread aborted...");
                         break;
+                    }
+
+                    if await_continuation {
+                        match continuation_receiver.recv() {
+                            Ok(HandlerContinuation::Execute(task)) => {
+                                continued_task = Some(task);
+                            }
+                            Ok(HandlerContinuation::Release) => {}
+                            Err(RecvError) => break,
+                        }
                     }
                 }
             }
@@ -3436,6 +3488,7 @@ mod tests {
         ]);
 
         static TASK_COUNT: Mutex<usize> = Mutex::new(0);
+        *TASK_COUNT.lock().unwrap() = 0;
 
         #[derive(Debug)]
         struct CountingFaultyHandler;
@@ -3490,7 +3543,98 @@ mod tests {
             Some((Err(TransactionError::AccountNotFound), _timings))
         );
         sleepless_testing::at(TestCheckPoint::AfterSchedulerThreadAborted);
-        assert!(*TASK_COUNT.lock().unwrap() < 10);
+        // Task 1 is the first continuation after task 0. Its failure must disconnect the private
+        // continuation channels and wake every handler without starting task 2.
+        assert_eq!(*TASK_COUNT.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_serialized_tasks_continue_on_same_handler() {
+        agave_logger::setup();
+
+        const TASK_COUNT: OrderedTaskId = 8;
+        const HANDLER_COUNT: usize = 4;
+
+        let _progress = sleepless_testing::setup(&[
+            &CheckPoint::BufferedOrDroppedTask(TASK_COUNT - 1),
+            &TestCheckPoint::AfterBufferedTask,
+        ]);
+
+        static EXECUTIONS: Mutex<Vec<(OrderedTaskId, String)>> = Mutex::new(Vec::new());
+        EXECUTIONS.lock().unwrap().clear();
+
+        #[derive(Debug)]
+        struct RecordingHandler;
+        impl TaskHandler for RecordingHandler {
+            fn handle(
+                _result: &mut Result<()>,
+                _timings: &mut ExecuteTimings,
+                _scheduling_context: &SchedulingContext,
+                task: &Task,
+                _handler_context: &HandlerContext,
+            ) {
+                if task.task_id() == 0 {
+                    // Keep the first task running until every successor is buffered behind it.
+                    sleepless_testing::at(TestCheckPoint::AfterBufferedTask);
+                }
+
+                let handler_name = thread::current().name().unwrap().to_owned();
+                EXECUTIONS
+                    .lock()
+                    .unwrap()
+                    .push((task.task_id(), handler_name));
+            }
+        }
+
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config(10_000);
+        let bank = Bank::new_for_tests(&genesis_config);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
+        let pool = SchedulerPool::<PooledScheduler<RecordingHandler>, _>::new_for_verification(
+            Some(HANDLER_COUNT),
+            None,
+            None,
+            None,
+            None,
+        );
+        let scheduler = pool.do_take_scheduler(SchedulingContext::new(bank.clone()));
+
+        for task_id in 0..TASK_COUNT {
+            // Every transaction write-locks the mint account, so only one can run at a time.
+            let transaction = ReplayTransaction::from(system_transaction::transfer(
+                &mint_keypair,
+                &solana_pubkey::new_rand(),
+                1,
+                genesis_config.hash(),
+            ));
+            scheduler.schedule_execution(transaction, task_id).unwrap();
+        }
+
+        let bank = BankWithScheduler::new(bank, Some(Box::new(scheduler)));
+        assert_matches!(bank.wait_for_completed_scheduler(), Some((Ok(()), _)));
+
+        let executions = EXECUTIONS.lock().unwrap();
+        assert_eq!(executions.len(), TASK_COUNT as usize);
+        assert_eq!(
+            executions
+                .iter()
+                .map(|(task_id, _handler_name)| *task_id)
+                .collect::<Vec<_>>(),
+            (0..TASK_COUNT).collect::<Vec<_>>()
+        );
+
+        // Task 0 takes the ordinary idle path. Task 1 is the first shared blocked-task dispatch;
+        // all remaining tasks must then be handed directly back to that same handler.
+        let continuation_handler = &executions[1].1;
+        assert!(
+            executions[2..]
+                .iter()
+                .all(|(_task_id, handler_name)| handler_name == continuation_handler),
+            "serialized continuation moved away from {continuation_handler}: {executions:?}"
+        );
     }
 
     fn create_genesis_config_for_block_production(lamports: u64) -> GenesisConfigInfo {
