@@ -193,8 +193,12 @@ impl PartialEq for ProgramCacheEntry {
 }
 
 impl ProgramCacheEntry {
-    /// Creates a loaded user program
+    /// Creates a loaded user program.
+    ///
+    /// `program_id` is the program account's pubkey, even when the ELF is stored in a
+    /// separate ProgramData account. It identifies the executable to JIT profilers.
     pub fn load(
+        program_id: &Pubkey,
         loader_key: &Pubkey,
         program_runtime_environment: ProgramRuntimeEnvironment,
         deployment_slot: Slot,
@@ -204,7 +208,9 @@ impl ProgramCacheEntry {
         let entry_stats = ProgramStatistics::default();
         #[cfg(feature = "metrics")]
         let load_elf_time = solana_svm_measure::measure::Measure::start("load_elf_time");
-        let executable = Executable::load(elf_bytes, Arc::clone(&*program_runtime_environment))?;
+        let mut executable =
+            Executable::load(elf_bytes, Arc::clone(&*program_runtime_environment))?;
+        executable.set_program_id(program_id.to_string());
 
         #[cfg(feature = "metrics")]
         {

@@ -136,6 +136,7 @@ pub fn add_program_to_program_cache(
     .unwrap();
 
     let entry = ProgramCacheEntry::load(
+        program_id,
         loader_key,
         program_runtime_environment,
         0, // deployment_slot

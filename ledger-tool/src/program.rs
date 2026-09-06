@@ -284,10 +284,9 @@ fn load_program<'a>(
         true,  /* debugging_features */
     )
     .unwrap();
-    // Allowing mut here, since it may be needed for jit compile, which is under a config flag
-    #[allow(unused_mut)]
-    let mut verified_executable = if is_elf {
+    let verified_executable = if is_elf {
         let result = ProgramCacheEntry::load(
+            &program_id,
             &loader_key,
             ProgramRuntimeEnvironment::clone(&program_runtime_environment),
             slot,
@@ -307,7 +306,8 @@ fn load_program<'a>(
             Arc::clone(&*program_runtime_environment),
         )
         .map_err(|err| format!("Assembling executable failed: {err:?}"))
-        .and_then(|executable| {
+        .and_then(|mut executable| {
+            executable.set_program_id(program_id.to_string());
             executable
                 .verify::<RequisiteVerifier>()
                 .map_err(|err| format!("Verifying executable failed: {err:?}"))?;
