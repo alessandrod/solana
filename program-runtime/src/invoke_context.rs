@@ -795,7 +795,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
                 Ok(())
             }
             ProgramResult::Err(ref err) => {
-                if let EbpfError::SyscallError(syscall_error) = err {
+                if let EbpfError::SyscallError(syscall_error) = err.as_ref() {
                     if let Some(instruction_err) = syscall_error.downcast_ref::<InstructionError>()
                     {
                         stable_log::program_failure(&logger, &program_id, instruction_err);
