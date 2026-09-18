@@ -362,7 +362,8 @@ pub fn execute<'a, 'b: 'a>(
                 let error: InstructionError = status.into();
                 Err(Box::new(error) as Box<dyn std::error::Error>)
             }
-            ProgramResult::Err(mut error) => {
+            ProgramResult::Err(error) => {
+                let mut error = *error;
                 // Don't clean me up!!
                 // This feature is active on all networks, but we still toggle
                 // it off during fuzzing.

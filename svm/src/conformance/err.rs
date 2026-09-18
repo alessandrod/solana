@@ -8,7 +8,7 @@ use {
         memory::MemoryTranslationError,
         solana_sbpf::{
             elf::ElfError,
-            error::{EbpfError, StableResult},
+            error::{EbpfError, ProgramResult},
         },
     },
     solana_syscalls::SyscallError,
@@ -97,9 +97,9 @@ impl UnpackedResult {
 }
 
 /// Map a VM `program_result` to its [`UnpackedResult`].
-pub fn unpack_stable_result(program_result: StableResult<u64, EbpfError>) -> UnpackedResult {
+pub fn unpack_stable_result(program_result: ProgramResult) -> UnpackedResult {
     match program_result {
-        StableResult::Ok(r0) => UnpackedResult::ok(r0),
-        StableResult::Err(ebpf_err) => UnpackedResult::from_ebpf_err(ebpf_err),
+        ProgramResult::Ok(r0) => UnpackedResult::ok(r0),
+        ProgramResult::Err(ebpf_err) => UnpackedResult::from_ebpf_err(*ebpf_err),
     }
 }

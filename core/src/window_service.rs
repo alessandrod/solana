@@ -454,7 +454,7 @@ impl WindowService {
                         .expect("fresh slot-ingest stream has one publisher slot"),
                 };
                 let thread_pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(get_thread_count().min(8))
+                    .num_threads(get_thread_count().min(1))
                     // Use the current thread as one of the workers. This reduces overhead when the
                     // pool is used to process a small number of shreds, since they'll be processed
                     // directly on the current thread.
