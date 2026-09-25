@@ -147,7 +147,7 @@ dependencies = [
  "libc",
  "nix",
  "shaq",
- "thiserror 2.0.21",
+ "thiserror 2.0.20",
  "wincode",
  "wincode-dynamic",
 ]
