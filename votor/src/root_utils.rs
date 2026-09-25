@@ -122,7 +122,7 @@ pub fn check_and_handle_new_root<CB>(
     my_pubkey: &Pubkey,
     callback: CB,
 ) where
-    CB: FnOnce(&BankForks),
+    CB: FnOnce(&BankForks, &[BankWithScheduler]),
 {
     // get the root bank before squash
     let root_bank = bank_forks
@@ -202,8 +202,8 @@ pub fn check_and_handle_new_root<CB>(
 
 /// Sets the bank forks root:
 /// - Prune the program cache
-/// - Prune bank forks and drop the removed banks
-/// - Calls the callback for use in replay stage and tests
+/// - Prune bank forks and call the callback with the removed banks
+/// - Send the removed banks to the drop service
 pub fn set_bank_forks_root<CB>(
     my_pubkey: &Pubkey,
     new_root: Slot,
@@ -213,7 +213,7 @@ pub fn set_bank_forks_root<CB>(
     drop_bank_sender: &Sender<Vec<BankWithScheduler>>,
     callback: CB,
 ) where
-    CB: FnOnce(&BankForks),
+    CB: FnOnce(&BankForks, &[BankWithScheduler]),
 {
     let banks_to_remove: Vec<_> = {
         let bank_forks = bank_forks.read().unwrap();
@@ -233,6 +233,11 @@ pub fn set_bank_forks_root<CB>(
         highest_super_majority_root,
     );
 
+    {
+        let r_bank_forks = bank_forks.read().unwrap();
+        callback(&r_bank_forks, &removed_banks);
+    }
+
     if let Err(channel_name) = nonblocking_send(
         my_pubkey,
         drop_bank_sender,
@@ -241,6 +246,4 @@ pub fn set_bank_forks_root<CB>(
     ) {
         info!("{my_pubkey} channel {channel_name} disconnected");
     }
-    let r_bank_forks = bank_forks.read().unwrap();
-    callback(&r_bank_forks);
 }
