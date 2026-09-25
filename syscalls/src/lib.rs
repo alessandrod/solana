@@ -628,14 +628,14 @@ fn translate_slice_mut<T>(
 }
 
 fn touch_type_mut<T>(memory_mapping: &mut MemoryMapping, vm_addr: u64) -> Result<(), Error> {
-    memory_mapping
-        .map_with_access_violation_handler(
-            AccessType::Store,
-            vm_addr,
-            size_of::<T>() as u64,
-            |_| (),
-        )
-        .into()
+    translate_inner!(
+        memory_mapping,
+        map_with_access_violation_handler,
+        AccessType::Store,
+        vm_addr,
+        size_of::<T>() as u64,
+    )
+    .map(|_| ())
 }
 fn touch_slice_mut<T>(
     memory_mapping: &mut MemoryMapping,
@@ -645,14 +645,14 @@ fn touch_slice_mut<T>(
     if element_count == 0 {
         return Ok(());
     }
-    memory_mapping
-        .map_with_access_violation_handler(
-            AccessType::Store,
-            vm_addr,
-            element_count.saturating_mul(size_of::<T>() as u64),
-            |_| (),
-        )
-        .into()
+    translate_inner!(
+        memory_mapping,
+        map_with_access_violation_handler,
+        AccessType::Store,
+        vm_addr,
+        element_count.saturating_mul(size_of::<T>() as u64),
+    )
+    .map(|_| ())
 }
 
 // No other translated references can be live when calling this.
