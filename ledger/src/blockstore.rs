@@ -16,6 +16,7 @@ use {
         blockstore_options::{
             BLOCKSTORE_DIRECTORY_ROCKS_LEVEL, BlockstoreOptions, LedgerColumnOptions,
         },
+        events::{FecSetCompleted, IngestPublishers},
         next_slots_iterator::NextSlotsIterator,
         shred::{
             self, DATA_SHREDS_PER_FEC_BLOCK, ErasureSetId, Payload, ProcessShredsStats,
@@ -26,6 +27,7 @@ use {
         slot_stats::{ShredSource, SlotsStats},
         transaction_address_lookup_table_scanner::scan_transaction,
     },
+    agave_event_system::event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
     agave_snapshots::unpack_genesis_archive,
     agave_votor_messages::{
         migration::MigrationStatus, unverified_vote_message::UnverifiedCertificate,
@@ -2225,6 +2227,7 @@ impl Blockstore {
         shred_recovery_context: Option<&mut ShredRecoveryContext>,
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
+        publishers: &mut IngestPublishers,
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<InsertResults> {
         let mut total_start = Measure::start("Total elapsed");
@@ -2243,6 +2246,7 @@ impl Blockstore {
             shred_recovery_context,
             pinnable_slice,
             write_batch,
+            publishers,
             metrics,
         );
         write_batch.clear();
@@ -2266,6 +2270,7 @@ impl Blockstore {
         shred_recovery_context: Option<&mut ShredRecoveryContext>,
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
+        publishers: &mut IngestPublishers,
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<InsertResults> {
         let shreds = shreds.into_iter();
@@ -2329,6 +2334,40 @@ impl Blockstore {
 
         metrics.index_meta_time_us += shred_insertion_tracker.index_meta_time_us;
 
+        // The Merkle-root working set already has one entry per location/FEC set.
+        // Report only sets with newly inserted data, so late coding shreds do not
+        // repeat completion events. Recovery inserts into the same working sets.
+        if publishers.fec_sets.is_enabled() {
+            let (tid, pid) = cached_thread_and_process_id();
+            for &(location, erasure_set) in shred_insertion_tracker.merkle_root_metas.keys() {
+                let slot = erasure_set.slot();
+                let start = u64::from(erasure_set.fec_set_index());
+                let end = start + DATA_SHREDS_PER_FEC_BLOCK as u64;
+                let Some(index) = shred_insertion_tracker
+                    .index_working_set
+                    .get(&(location, slot))
+                else {
+                    continue;
+                };
+                if index.index.data().contains_range(start..end)
+                    && (start..end).any(|index| {
+                        shred_insertion_tracker.just_inserted_shreds.contains_key(&(
+                            location,
+                            ShredId::new(slot, index as u32, ShredType::Data),
+                        ))
+                    })
+                {
+                    let _ = publishers.fec_sets.publish(&FecSetCompleted {
+                        pid,
+                        tid,
+                        timestamp_ns: monotonic_timestamp_ns(),
+                        slot,
+                        fec_set_index: erasure_set.fec_set_index(),
+                    });
+                }
+            }
+        }
+
         Ok(InsertResults {
             completed_data_set_infos: shred_insertion_tracker.newly_completed_data_sets,
             duplicate_shreds: shred_insertion_tracker.duplicate_shreds,
@@ -2363,6 +2402,7 @@ impl Blockstore {
             &mut pinnable_slice,
             &mut write_batch,
             handle_duplicate,
+            &mut IngestPublishers::default(),
             metrics,
         )
     }
@@ -2373,6 +2413,8 @@ impl Blockstore {
     /// and handling duplicate shreds). Broadcast stage should instead call
     /// Blockstore::insert_shreds when inserting own shreds during leader slots.
     /// The pinnable slice and write batch can be reused across calls.
+    /// Publishes FEC-set completion events after committing all data shreds of a FEC set,
+    /// while holding the insertion lock.
     pub fn insert_shreds_at_location_handle_duplicate<'a, 'db, F>(
         &'db self,
         shreds: impl IntoIterator<
@@ -2384,6 +2426,7 @@ impl Blockstore {
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
         handle_duplicate: &F,
+        publishers: &mut IngestPublishers,
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<Vec<CompletedDataSetInfo>>
     where
@@ -2398,6 +2441,7 @@ impl Blockstore {
             Some(shred_recovery_context),
             pinnable_slice,
             write_batch,
+            publishers,
             metrics,
         )?;
 
@@ -2492,6 +2536,7 @@ impl Blockstore {
             None, // should_recover_shreds
             pinnable_slice,
             &mut write_batch,
+            &mut IngestPublishers::default(),
             &mut BlockstoreInsertionMetrics::default(),
         )?;
 
@@ -2610,6 +2655,7 @@ impl Blockstore {
             None, // Skip recovery for locally produced shreds.
             pinnable_slice,
             write_batch,
+            &mut IngestPublishers::default(),
             &mut BlockstoreInsertionMetrics::default(),
         )?;
         Ok(insert_results.completed_data_set_infos)
@@ -2642,6 +2688,7 @@ impl Blockstore {
                 None, // Skip recovery for this direct insertion path.
                 &mut pinnable_slice,
                 &mut write_batch,
+                &mut IngestPublishers::default(),
                 &mut BlockstoreInsertionMetrics::default(),
             )
             .unwrap();
