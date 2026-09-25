@@ -8992,6 +8992,7 @@ dependencies = [
 name = "solana-ledger"
 version = "4.5.0-alpha.4"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-logger",
  "agave-reserved-account-keys",
