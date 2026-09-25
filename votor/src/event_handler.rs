@@ -1146,7 +1146,7 @@ mod tests {
                 &self.bank_forks,
                 None,
                 &self.my_pubkey,
-                |_| {},
+                |_, _| {},
             );
         }
 
