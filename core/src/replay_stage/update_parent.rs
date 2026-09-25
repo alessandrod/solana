@@ -7,11 +7,13 @@ use {
             DeadSlotLogLevel, DeadSlotNotifications, mark_hard_dead_slot,
             mark_hard_dead_slot_notifications, send_invalid_bank,
         },
+        events::SlotEvent,
     },
     crate::{
         consensus::progress_map::{DeadSlotReason, ProgressMap},
         repair::cluster_slot_state_verifier::{DuplicateSlotsToRepair, PurgeRepairSlotCounter},
     },
+    agave_event_system::publisher::Publisher,
     agave_votor_messages::{consensus_message::BlockId, migration::MigrationStatus},
     solana_clock::Slot,
     solana_entry::block_component::VersionedUpdateParent,
@@ -120,6 +122,7 @@ fn notify_entry_update_parent(
 /// the current UpdateParent parent and FEC-set offset recorded in `SlotMeta`.
 #[allow(clippy::too_many_arguments)]
 fn try_restart_slot_from_update_parent(
+    slot_event_publisher: &mut Publisher<SlotEvent>,
     my_pubkey: &Pubkey,
     blockstore: &Blockstore,
     bank_forks: &RwLock<BankForks>,
@@ -201,6 +204,7 @@ fn try_restart_slot_from_update_parent(
         bank.bank_id()
     });
     ReplayStage::clear_slots(
+        slot_event_publisher,
         [slot],
         bank_forks,
         progress,
@@ -236,6 +240,7 @@ fn try_restart_slot_from_update_parent(
 /// soft-dead state is promoted to a durable hard-dead slot.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn process_soft_dead_slots(
+    slot_event_publisher: &mut Publisher<SlotEvent>,
     my_pubkey: &Pubkey,
     blockstore: &Arc<Blockstore>,
     bank_forks: &RwLock<BankForks>,
@@ -278,6 +283,7 @@ pub(super) fn process_soft_dead_slots(
 
         if replay_offset.is_some() {
             try_restart_slot_from_update_parent(
+                slot_event_publisher,
                 my_pubkey,
                 blockstore.as_ref(),
                 bank_forks,
@@ -329,6 +335,7 @@ pub(super) fn process_soft_dead_slots(
 /// and slots that already replayed past the UpdateParent marker.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_update_parent_interrupts(
+    slot_event_publisher: &mut Publisher<SlotEvent>,
     my_pubkey: &Pubkey,
     blockstore: &Blockstore,
     bank_forks: &RwLock<BankForks>,
@@ -342,6 +349,7 @@ pub(super) fn handle_update_parent_interrupts(
 ) -> Result<(), ReplayStageError> {
     while let Ok(signal) = update_parent_receiver.try_recv() {
         try_restart_slot_from_update_parent(
+            slot_event_publisher,
             my_pubkey,
             blockstore,
             bank_forks,
@@ -362,6 +370,7 @@ pub(super) fn handle_update_parent_interrupts(
 /// `UpdateParent` marker itself.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_abandoned_bank(
+    slot_event_publisher: &mut Publisher<SlotEvent>,
     process_active_banks_context: &ProcessActiveBanksContext,
     bank: &Arc<Bank>,
     bank_slot: Slot,
@@ -434,6 +443,7 @@ pub(super) fn handle_abandoned_bank(
     // Clear the bank from bank_forks. It will be recreated with the correct
     // parent by generate_new_bank_forks on the next iteration.
     ReplayStage::clear_slots(
+        slot_event_publisher,
         [bank_slot],
         bank_forks,
         progress,
