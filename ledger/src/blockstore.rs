@@ -2290,6 +2290,7 @@ impl Blockstore {
         shred_recovery_context: Option<&mut ShredRecoveryContext>,
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
+        handle_completed_fec_set: impl FnMut(Slot, u32),
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<InsertResults> {
         let mut total_start = Measure::start("Total elapsed");
@@ -2308,6 +2309,7 @@ impl Blockstore {
             shred_recovery_context,
             pinnable_slice,
             write_batch,
+            handle_completed_fec_set,
             metrics,
         );
         write_batch.clear();
@@ -2331,8 +2333,10 @@ impl Blockstore {
         shred_recovery_context: Option<&mut ShredRecoveryContext>,
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
+        mut handle_completed_fec_set: impl FnMut(Slot, u32),
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<InsertResults> {
+        let report_completed_fec_sets = shred_recovery_context.is_some();
         let shreds = shreds.into_iter();
         let mut shred_insertion_tracker = ShredInsertionTracker::new(shreds.len(), write_batch);
 
@@ -2398,6 +2402,33 @@ impl Blockstore {
 
         metrics.index_meta_time_us += shred_insertion_tracker.index_meta_time_us;
 
+        // The Merkle-root working set already has one entry per location/FEC set.
+        // Report only sets with newly inserted data, so late coding shreds do not
+        // repeat completion events. Recovery inserts into the same working sets.
+        if report_completed_fec_sets {
+            for &(location, erasure_set) in shred_insertion_tracker.merkle_root_metas.keys() {
+                let slot = erasure_set.slot();
+                let start = u64::from(erasure_set.fec_set_index());
+                let end = start + DATA_SHREDS_PER_FEC_BLOCK as u64;
+                let Some(index) = shred_insertion_tracker
+                    .index_working_set
+                    .get(&(location, slot))
+                else {
+                    continue;
+                };
+                if index.index.data().contains_range(start..end)
+                    && (start..end).any(|index| {
+                        shred_insertion_tracker.just_inserted_shreds.contains_key(&(
+                            location,
+                            ShredId::new(slot, index as u32, ShredType::Data),
+                        ))
+                    })
+                {
+                    handle_completed_fec_set(slot, erasure_set.fec_set_index());
+                }
+            }
+        }
+
         Ok(InsertResults {
             completed_data_set_infos: shred_insertion_tracker.newly_completed_data_sets,
             duplicate_shreds: shred_insertion_tracker.duplicate_shreds,
@@ -2432,6 +2463,7 @@ impl Blockstore {
             &mut pinnable_slice,
             &mut write_batch,
             handle_duplicate,
+            |_, _| {},
             metrics,
         )
     }
@@ -2442,6 +2474,8 @@ impl Blockstore {
     /// and handling duplicate shreds). Broadcast stage should instead call
     /// Blockstore::insert_shreds when inserting own shreds during leader slots.
     /// The pinnable slice and write batch can be reused across calls.
+    /// Calls `handle_completed_fec_set` after committing all data shreds of a FEC set,
+    /// while holding the insertion lock. The callback must not block or reenter insertion.
     pub fn insert_shreds_at_location_handle_duplicate<'a, 'db, F>(
         &'db self,
         shreds: impl IntoIterator<
@@ -2453,6 +2487,7 @@ impl Blockstore {
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
         handle_duplicate: &F,
+        handle_completed_fec_set: impl FnMut(Slot, u32),
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<Vec<CompletedDataSetInfo>>
     where
@@ -2467,6 +2502,7 @@ impl Blockstore {
             Some(shred_recovery_context),
             pinnable_slice,
             write_batch,
+            handle_completed_fec_set,
             metrics,
         )?;
 
@@ -2573,6 +2609,7 @@ impl Blockstore {
             None, // should_recover_shreds
             pinnable_slice,
             &mut write_batch,
+            |_, _| {},
             &mut BlockstoreInsertionMetrics::default(),
         )?;
 
@@ -2691,6 +2728,7 @@ impl Blockstore {
             None, // Skip recovery for locally produced shreds.
             pinnable_slice,
             write_batch,
+            |_, _| {},
             &mut BlockstoreInsertionMetrics::default(),
         )?;
         Ok(insert_results.completed_data_set_infos)
@@ -2723,6 +2761,7 @@ impl Blockstore {
                 None, // Skip recovery for this direct insertion path.
                 &mut pinnable_slice,
                 &mut write_batch,
+                |_, _| {},
                 &mut BlockstoreInsertionMetrics::default(),
             )
             .unwrap();
