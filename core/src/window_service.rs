@@ -5,6 +5,7 @@
 use {
     crate::{
         completed_data_sets_service::CompletedDataSetsSender,
+        events::create_event_stream,
         repair::{
             block_id_repair_service::{BlockIdRepairChannels, BlockIdRepairService},
             repair_service::{
@@ -13,6 +14,7 @@ use {
         },
         result::{Error, Result},
     },
+    agave_event_system::{EventSystem, PublisherFactory, StreamConfig},
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded},
     rayon::{ThreadPool, prelude::*},
     solana_clock::Slot,
@@ -23,6 +25,7 @@ use {
         },
         blockstore_db::{DBPinnableSlice, WriteBatch},
         blockstore_meta::BlockLocation,
+        events::{self, FecSetCompleted, IngestPublishers},
         shred::{self, Shred, filter::ShredRecoveryContext},
     },
     solana_measure::measure::Measure,
@@ -167,6 +170,7 @@ fn run_insert<'db, F>(
     metrics: &mut BlockstoreInsertionMetrics,
     ws_metrics: &mut WindowServiceMetrics,
     completed_data_sets_sender: Option<&CompletedDataSetsSender>,
+    publishers: &mut IngestPublishers,
 ) -> Result<()>
 where
     F: Fn(PossibleDuplicateShred),
@@ -202,6 +206,7 @@ where
         pinnable_slice,
         write_batch,
         &handle_duplicate,
+        publishers,
         metrics,
     )?;
 
@@ -251,6 +256,7 @@ pub(crate) struct WindowService {
 impl WindowService {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        event_system: &EventSystem,
         blockstore: Arc<Blockstore>,
         repair_socket: Arc<UdpSocket>,
         ancestor_hashes_socket: Arc<UdpSocket>,
@@ -262,6 +268,15 @@ impl WindowService {
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
         repair_xdp_sender: Option<PinnedXdpSender>,
     ) -> WindowService {
+        let fec_event_factory = create_event_stream::<FecSetCompleted>(
+            event_system,
+            events::FEC_SET_COMPLETED_STREAM,
+            StreamConfig {
+                capacity: 100_000,
+                publisher_slots: 1,
+                subscriber_slots: 8,
+            },
+        );
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
 
@@ -308,6 +323,7 @@ impl WindowService {
 
         let sharable_banks = bank_forks.read().unwrap().sharable_banks();
         let t_insert = Self::start_window_insert_thread(
+            fec_event_factory,
             exit,
             blockstore,
             sharable_banks,
@@ -354,6 +370,7 @@ impl WindowService {
     }
 
     fn start_window_insert_thread(
+        fec_event_factory: PublisherFactory<FecSetCompleted>,
         exit: Arc<AtomicBool>,
         blockstore: Arc<Blockstore>,
         sharable_banks: SharableBanks,
@@ -366,6 +383,11 @@ impl WindowService {
         Builder::new()
             .name("solWinInsert".to_string())
             .spawn(move || {
+                let mut publishers = IngestPublishers {
+                    fec_sets: fec_event_factory
+                        .try_create_publisher()
+                        .expect("fresh FEC-set stream has one publisher slot"),
+                };
                 let thread_pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(get_thread_count().min(8))
                     // Use the current thread as one of the workers. This reduces overhead when the
@@ -405,6 +427,7 @@ impl WindowService {
                         &mut metrics,
                         &mut ws_metrics,
                         completed_data_sets_sender.as_ref(),
+                        &mut publishers,
                     ) {
                         ws_metrics.record_error(&e);
                         if Self::should_exit_on_error(e) {
