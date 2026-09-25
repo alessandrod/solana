@@ -20,6 +20,7 @@ pub mod blockstore_processor;
 pub mod deshred_transaction_notifier_interface;
 pub mod entry_notifier_interface;
 pub mod entry_notifier_service;
+pub mod events;
 pub mod genesis_utils;
 pub mod leader_schedule_cache;
 pub mod next_slots_iterator;
