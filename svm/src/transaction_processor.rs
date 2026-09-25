@@ -3273,13 +3273,7 @@ mod tests {
             true,
         );
         let entry = program_cache_for_tx_batch.find(&program_id).unwrap();
-        let ProgramCacheEntryType::Loaded(executable) = &entry.program else {
-            panic!("Expected a loaded program");
-        };
-        assert_eq!(
-            executable.get_program_id(),
-            Some(program_id.to_string().as_str())
-        );
+        assert!(matches!(entry.program, ProgramCacheEntryType::Loaded(_)));
         assert_eq!(entry.deployment_slot, expected_deployment_slot);
         assert_eq!(entry.account_owner, loader);
     }

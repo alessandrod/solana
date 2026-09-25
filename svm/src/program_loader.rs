@@ -118,7 +118,6 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
         }
 
         ProgramAccountLoadResult::ProgramOfLoaderV1(program_account) => ProgramCacheEntry::load(
-            pubkey,
             program_account.owner(),
             ProgramRuntimeEnvironment::clone(program_runtime_environment),
             0,
@@ -129,7 +128,6 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
         .map_err(|_| (0, ProgramCacheEntryOwner::LoaderV1)),
 
         ProgramAccountLoadResult::ProgramOfLoaderV2(program_account) => ProgramCacheEntry::load(
-            pubkey,
             program_account.owner(),
             ProgramRuntimeEnvironment::clone(program_runtime_environment),
             0,
@@ -149,7 +147,6 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
             .ok_or(())
             .and_then(|programdata| {
                 ProgramCacheEntry::load(
-                    pubkey,
                     program_account.owner(),
                     ProgramRuntimeEnvironment::clone(program_runtime_environment),
                     deployment_slot,
@@ -168,7 +165,6 @@ pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
                 .ok_or(())
                 .and_then(|elf_bytes| {
                     ProgramCacheEntry::load(
-                        pubkey,
                         &loader_v4::id(),
                         ProgramRuntimeEnvironment::clone(program_runtime_environment),
                         deployment_slot,
@@ -639,26 +635,16 @@ mod tests {
         let slot: Slot = 2;
         let environment = ProgramRuntimeEnvironment::from(BuiltinProgram::new_mock());
 
-        for program_id in [Pubkey::new_unique(), Pubkey::new_unique()] {
-            let entry = ProgramCacheEntry::load(
-                &program_id,
-                &loader,
-                ProgramRuntimeEnvironment::clone(&environment),
-                slot,
-                &buffer,
-                #[cfg(feature = "metrics")]
-                &mut metrics,
-            )
-            .unwrap();
+        let result = ProgramCacheEntry::load(
+            &loader,
+            ProgramRuntimeEnvironment::clone(&environment),
+            slot,
+            &buffer,
+            #[cfg(feature = "metrics")]
+            &mut metrics,
+        );
 
-            let ProgramCacheEntryType::Loaded(executable) = entry.program else {
-                panic!("Expected a loaded program");
-            };
-            assert_eq!(
-                executable.get_program_id(),
-                Some(program_id.to_string().as_str())
-            );
-        }
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -856,7 +842,6 @@ mod tests {
 
         let program_runtime_environment = get_mock_program_runtime_environment();
         let expected = ProgramCacheEntry::load(
-            &key,
             account_data.owner(),
             ProgramRuntimeEnvironment::clone(&program_runtime_environment),
             0,
@@ -945,7 +930,6 @@ mod tests {
 
         let program_runtime_environment = get_mock_program_runtime_environment();
         let expected = ProgramCacheEntry::load(
-            &key1,
             account_data.owner(),
             ProgramRuntimeEnvironment::clone(&program_runtime_environment),
             0,
