@@ -25,8 +25,5 @@ pub enum SlotEvent {
         num_shreds: u64,
     },
     /// The bank was removed from BankForks, not necessarily destroyed.
-    Removed {
-        timestamp_ns: u64,
-        slot: Slot,
-    },
+    Removed { timestamp_ns: u64, slot: Slot },
 }

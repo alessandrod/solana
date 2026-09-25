@@ -1,20 +1,25 @@
 //! The `shred_fetch_stage` pulls shreds from UDP sockets and sends it to a channel.
 
 use {
-    crate::repair::{
-        repair_service::OutstandingShredRepairs, serve_repair::PendingRepairPingRingBuffer,
+    crate::{
+        repair::{
+            repair_service::OutstandingShredRepairs, serve_repair::PendingRepairPingRingBuffer,
+        },
+        shred_fetch_stage::events::ShredReceived,
     },
-    crossbeam_channel::{RecvError, TryRecvError},
+    agave_event_system::{EventSystem, PublisherFactory, StreamConfig, publisher::Publisher},
+    arrayvec::ArrayVec,
+    crossbeam_channel::{Receiver, RecvError, TryRecvError, TrySendError},
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::shred::{
         self,
         filter::{ShredFilterContext, TurbineMode},
     },
-    solana_perf::packet::{BytesPacket, PacketBatch, PacketFlags},
+    solana_perf::packet::{BytesPacket, PACKETS_PER_BATCH, PacketBatch, PacketFlags},
     solana_runtime::bank_forks::{BankForks, SharableBanks},
     solana_streamer::{
         evicting_sender::EvictingSender,
-        streamer::{self, ChannelSend, PacketBatchReceiver, StreamerReceiveStats},
+        streamer::{self, ChannelSend, StreamerReceiveStats},
     },
     std::{
         net::UdpSocket,
@@ -23,6 +28,37 @@ use {
         time::Duration,
     },
 };
+
+pub mod events;
+
+struct ReceivedShredBatch {
+    packets: PacketBatch,
+    received_ns: u64,
+}
+
+#[derive(Clone)]
+struct TimestampedShredSender(EvictingSender<ReceivedShredBatch>);
+
+impl ChannelSend<PacketBatch> for TimestampedShredSender {
+    fn try_send(&self, packets: PacketBatch) -> Result<(), TrySendError<PacketBatch>> {
+        self.0
+            .try_send(ReceivedShredBatch {
+                packets,
+                received_ns: agave_event_system::monotonic_timestamp_ns(),
+            })
+            .map_err(|err| match err {
+                TrySendError::Full(batch) => TrySendError::Full(batch.packets),
+                TrySendError::Disconnected(batch) => TrySendError::Disconnected(batch.packets),
+            })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
 
 pub(crate) struct ShredFetchStage {
     thread_hdls: Vec<JoinHandle<()>>,
@@ -55,7 +91,8 @@ enum ShredIngress {
 impl ShredFetchStage {
     // updates packets received on a channel and sends them on another channel
     fn modify_packets(
-        recvr: PacketBatchReceiver,
+        publisher: &mut Publisher<ShredReceived>,
+        recvr: Receiver<ReceivedShredBatch>,
         recvr_stats: Option<Arc<StreamerReceiveStats>>,
         sendr: EvictingSender<PacketBatch>,
         sharable_banks: &SharableBanks,
@@ -87,7 +124,10 @@ impl ShredFetchStage {
                 );
             }
 
-            let mut packet_batch = if pending_pings.is_empty() {
+            let ReceivedShredBatch {
+                packets: mut packet_batch,
+                received_ns,
+            } = if pending_pings.is_empty() {
                 match recvr.recv() {
                     Ok(packet_batch) => packet_batch,
                     Err(RecvError) => break,
@@ -99,6 +139,29 @@ impl ShredFetchStage {
                     Err(TryRecvError::Disconnected) => break,
                 }
             };
+            let mut events = ArrayVec::<ShredReceived, PACKETS_PER_BATCH>::new();
+            for packet in packet_batch.iter() {
+                let Some(bytes) = shred::wire::get_shred(packet) else {
+                    continue;
+                };
+                let (Some(slot), Some(fec_set_index), Some(shred_index), Ok(shred_type)) = (
+                    shred::wire::get_slot(bytes),
+                    shred::wire::get_fec_set_index(bytes),
+                    shred::wire::get_index(bytes),
+                    shred::wire::get_shred_type(bytes),
+                ) else {
+                    continue;
+                };
+                events.push(ShredReceived {
+                    timestamp_ns: received_ns,
+                    slot,
+                    fec_set_index,
+                    shred_index,
+                    is_coding: shred_type == shred::ShredType::Code,
+                    is_repair: repair_context.is_some(),
+                });
+            }
+            let _ = publisher.publish_batch(&events);
             shred_filter_ctx.maybe_update(sharable_banks.root());
             shred_filter_ctx.stats.shred_count += packet_batch.len();
 
@@ -153,6 +216,7 @@ impl ShredFetchStage {
 
     #[allow(clippy::too_many_arguments)]
     fn packet_modifier(
+        event_factory: PublisherFactory<ShredReceived>,
         receiver_thread_name: &'static str,
         modifier_thread_name: &'static str,
         sockets: Vec<Arc<UdpSocket>>,
@@ -180,7 +244,7 @@ impl ShredFetchStage {
                     format!("{receiver_thread_name}{i:02}"),
                     socket,
                     exit.clone(),
-                    packet_sender.clone(),
+                    TimestampedShredSender(packet_sender.clone()),
                     receiver_stats.clone(),
                     Some(Duration::from_millis(5)), // coalesce
                     false,                          // is_staked_service
@@ -190,7 +254,11 @@ impl ShredFetchStage {
         let modifier_hdl = Builder::new()
             .name(modifier_thread_name.to_string())
             .spawn(move || {
+                let mut publisher = event_factory
+                    .try_create_publisher()
+                    .expect("shred stream has one publisher slot per ingress");
                 Self::modify_packets(
+                    &mut publisher,
                     packet_receiver,
                     Some(receiver_stats),
                     sender,
@@ -207,6 +275,7 @@ impl ShredFetchStage {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        event_system: &EventSystem,
         sockets: Vec<Arc<UdpSocket>>,
         repair_socket: Arc<UdpSocket>,
         sender: EvictingSender<PacketBatch>,
@@ -216,7 +285,17 @@ impl ShredFetchStage {
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
         turbine_mode: TurbineMode,
         exit: Arc<AtomicBool>,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        let event_factory = event_system
+            .create_stream::<ShredReceived>(
+                events::SHRED_RECEIVED_STREAM,
+                StreamConfig {
+                    capacity: 65536,
+                    publisher_slots: 2,
+                    subscriber_slots: 8,
+                },
+            )
+            .map_err(|err| format!("Failed to create shred-received event stream: {err}"))?;
         let repair_context = RepairContext {
             repair_socket: repair_socket.clone(),
             cluster_info,
@@ -224,6 +303,7 @@ impl ShredFetchStage {
         };
 
         let (mut tvu_threads, tvu_filter) = Self::packet_modifier(
+            event_factory.clone(),
             "solRcvrShred",
             "solTvuPktMod",
             sockets,
@@ -238,6 +318,7 @@ impl ShredFetchStage {
         );
 
         let (repair_receiver, repair_handler) = Self::packet_modifier(
+            event_factory,
             "solRcvrShredRep",
             "solTvuRepPktMod",
             vec![repair_socket],
@@ -254,9 +335,9 @@ impl ShredFetchStage {
         tvu_threads.extend(repair_receiver);
         tvu_threads.push(tvu_filter);
         tvu_threads.push(repair_handler);
-        Self {
+        Ok(Self {
             thread_hdls: tvu_threads,
-        }
+        })
     }
 
     pub(crate) fn join(self) -> thread::Result<()> {
