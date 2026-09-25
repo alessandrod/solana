@@ -1662,6 +1662,7 @@ impl Validator {
         let (votor_event_sender, votor_event_receiver) = bounded(1000);
 
         let tvu = Tvu::new(
+            &event_system,
             vote_account,
             authorized_voter_keypairs,
             bank_forks.clone(),
