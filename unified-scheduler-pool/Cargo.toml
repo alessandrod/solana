@@ -61,9 +61,5 @@ solana-system-transaction = { workspace = true }
 solana-unified-scheduler-pool = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }
 test-case = { workspace = true }
 
-[[bench]]
-name = "serialized_transactions"
-harness = false
-
 [lints]
 workspace = true

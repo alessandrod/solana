@@ -942,9 +942,9 @@ impl UsageQueueLoader {
     }
 
     fn is_overgrown(&self, max_usage_queue_count: usize) -> bool {
-        if self.usage_queue_loader().count() > max_usage_queue_count {
-            return true;
-        }
+        // if self.usage_queue_loader().count() > max_usage_queue_count {
+        //     return true;
+        // }
 
         match self {
             Self::OwnedBySelf {
