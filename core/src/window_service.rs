@@ -26,7 +26,7 @@ use {
         },
         blockstore_db::{DBPinnableSlice, WriteBatch},
         blockstore_meta::BlockLocation,
-        events::{self, FecSetCompleted, IngestPublishers},
+        events::{self, FecSetCompleted, IngestPublishers, IngestSlotEvent},
         shred::{self, ReedSolomonCache, Shred, filter::ShredRecoveryContext},
     },
     solana_measure::measure::Measure,
@@ -293,6 +293,15 @@ impl WindowService {
                 subscriber_slots: 8,
             },
         );
+        let slot_event_factory = create_event_stream::<IngestSlotEvent>(
+            event_system,
+            events::INGEST_SLOT_EVENT_STREAM,
+            StreamConfig {
+                capacity: 1024,
+                publisher_slots: 1,
+                subscriber_slots: 8,
+            },
+        );
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
 
@@ -339,7 +348,7 @@ impl WindowService {
 
         let sharable_banks = bank_forks.read().unwrap().sharable_banks();
         let t_insert = Self::start_window_insert_thread(
-            fec_event_factory,
+            (fec_event_factory, slot_event_factory),
             exit,
             blockstore,
             sharable_banks,
@@ -386,7 +395,10 @@ impl WindowService {
     }
 
     fn start_window_insert_thread(
-        fec_event_factory: PublisherFactory<FecSetCompleted>,
+        (fec_event_factory, slot_event_factory): (
+            PublisherFactory<FecSetCompleted>,
+            PublisherFactory<IngestSlotEvent>,
+        ),
         exit: Arc<AtomicBool>,
         blockstore: Arc<Blockstore>,
         sharable_banks: SharableBanks,
@@ -404,6 +416,9 @@ impl WindowService {
                     fec_sets: fec_event_factory
                         .try_create_publisher()
                         .expect("fresh FEC-set stream has one publisher slot"),
+                    slots: slot_event_factory
+                        .try_create_publisher()
+                        .expect("fresh slot-ingest stream has one publisher slot"),
                 };
                 let thread_pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(get_thread_count().min(8))
