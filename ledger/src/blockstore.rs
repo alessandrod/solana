@@ -26,6 +26,7 @@ use {
         slot_stats::{ShredSource, SlotsStats},
         transaction_address_lookup_table_scanner::scan_transaction,
     },
+    agave_event_system::monotonic_timestamp_ns,
     agave_snapshots::unpack_genesis_archive,
     agave_votor_messages::{
         migration::MigrationStatus, unverified_vote_message::UnverifiedCertificate,
@@ -343,6 +344,14 @@ pub struct InsertResults {
     duplicate_shreds: Vec<PossibleDuplicateShred>,
 }
 
+/// Ingestion progress reported after a successful shred insertion commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShredInsertEvent {
+    SlotBegin { slot: Slot, timestamp_ns: u64 },
+    FecSetComplete { slot: Slot, fec_set_index: u32 },
+    SlotComplete { slot: Slot, num_fec_sets: u64 },
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum ConfirmedBlockComponent {
     EntryBatch(Vec<EntrySummary>),
@@ -467,6 +476,8 @@ pub struct SlotMetaWorkingSetEntry {
     /// blockstore.  If None, it means the current slot is new to the
     /// blockstore.
     old_slot_meta: Option<SlotMeta>,
+    /// Monotonic timestamp of first data insertion into this original slot.
+    ingest_begin_ns: Option<u64>,
     /// True only if at least one shred for this SlotMeta was inserted since
     /// this struct was created.
     did_insert_occur: bool,
@@ -521,6 +532,7 @@ impl SlotMetaWorkingSetEntry {
         Self {
             new_slot_meta,
             old_slot_meta,
+            ingest_begin_ns: None,
             did_insert_occur: false,
         }
     }
@@ -2272,7 +2284,7 @@ impl Blockstore {
         shred_recovery_context: Option<&mut ShredRecoveryContext>,
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
-        handle_completed_fec_set: impl FnMut(Slot, u32),
+        handle_insert_event: impl FnMut(ShredInsertEvent),
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<InsertResults> {
         let mut total_start = Measure::start("Total elapsed");
@@ -2291,7 +2303,7 @@ impl Blockstore {
             shred_recovery_context,
             pinnable_slice,
             write_batch,
-            handle_completed_fec_set,
+            handle_insert_event,
             metrics,
         );
         write_batch.clear();
@@ -2315,10 +2327,10 @@ impl Blockstore {
         shred_recovery_context: Option<&mut ShredRecoveryContext>,
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
-        mut handle_completed_fec_set: impl FnMut(Slot, u32),
+        mut handle_insert_event: impl FnMut(ShredInsertEvent),
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<InsertResults> {
-        let report_completed_fec_sets = shred_recovery_context.is_some();
+        let report_insert_events = shred_recovery_context.is_some();
         let shreds = shreds.into_iter();
         let mut shred_insertion_tracker = ShredInsertionTracker::new(shreds.len(), write_batch);
 
@@ -2363,7 +2375,9 @@ impl Blockstore {
         start.stop();
         metrics.write_batch_elapsed_us += start.as_us();
 
-        if let Some(forwarder) = self.certificate_forwarder.get() {
+        if let Some(forwarder) = self.certificate_forwarder.get()
+            && !self.completed_slots_senders.lock().unwrap().is_empty()
+        {
             for (slot, last_index) in newly_completed_slots_with_last_index.iter() {
                 forwarder.maybe_forward_block_footer_certificate(self, *slot, *last_index);
             }
@@ -2374,16 +2388,22 @@ impl Blockstore {
             &self.completed_slots_senders.lock().unwrap(),
             &self.update_parent_signals.lock().unwrap(),
             should_signal,
-            newly_completed_slots_with_last_index,
+            &newly_completed_slots_with_last_index,
             update_parent_signals,
         );
 
         metrics.index_meta_time_us += shred_insertion_tracker.index_meta_time_us;
 
-        // The Merkle-root working set already has one entry per location/FEC set.
-        // Report only sets with newly inserted data, so late coding shreds do not
-        // repeat completion events. Recovery inserts into the same working sets.
-        if report_completed_fec_sets {
+        if report_insert_events {
+            for (&(_, slot), entry) in &shred_insertion_tracker.slot_meta_working_set {
+                if let Some(timestamp_ns) = entry.ingest_begin_ns {
+                    handle_insert_event(ShredInsertEvent::SlotBegin { slot, timestamp_ns });
+                }
+            }
+
+            // The Merkle-root working set already has one entry per location/FEC set.
+            // Report only sets with newly inserted data, so late coding shreds do not
+            // repeat completion events. Recovery inserts into the same working sets.
             for &(location, erasure_set) in shred_insertion_tracker.merkle_root_metas.keys() {
                 let slot = erasure_set.slot();
                 let start = u64::from(erasure_set.fec_set_index());
@@ -2402,8 +2422,17 @@ impl Blockstore {
                         ))
                     })
                 {
-                    handle_completed_fec_set(slot, erasure_set.fec_set_index());
+                    handle_insert_event(ShredInsertEvent::FecSetComplete {
+                        slot,
+                        fec_set_index: erasure_set.fec_set_index(),
+                    });
                 }
+            }
+            for &(slot, last_index) in &newly_completed_slots_with_last_index {
+                handle_insert_event(ShredInsertEvent::SlotComplete {
+                    slot,
+                    num_fec_sets: (last_index + 1) / DATA_SHREDS_PER_FEC_BLOCK as u64,
+                });
             }
         }
 
@@ -2441,7 +2470,7 @@ impl Blockstore {
             &mut pinnable_slice,
             &mut write_batch,
             handle_duplicate,
-            |_, _| {},
+            |_| {},
             metrics,
         )
     }
@@ -2452,8 +2481,9 @@ impl Blockstore {
     /// and handling duplicate shreds). Broadcast stage should instead call
     /// Blockstore::insert_shreds when inserting own shreds during leader slots.
     /// The pinnable slice and write batch can be reused across calls.
-    /// Calls `handle_completed_fec_set` after committing all data shreds of a FEC set,
-    /// while holding the insertion lock. The callback must not block or reenter insertion.
+    /// Calls `handle_insert_event` for ingestion starts and newly available FEC sets and
+    /// original slots after committing their data, while holding the insertion lock.
+    /// Slot starts precede completion events. The callback must not block or reenter insertion.
     pub fn insert_shreds_at_location_handle_duplicate<'a, 'db, F>(
         &'db self,
         shreds: impl IntoIterator<
@@ -2465,7 +2495,7 @@ impl Blockstore {
         pinnable_slice: &mut DBPinnableSlice<'db>,
         write_batch: &mut WriteBatch,
         handle_duplicate: &F,
-        handle_completed_fec_set: impl FnMut(Slot, u32),
+        handle_insert_event: impl FnMut(ShredInsertEvent),
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<Vec<CompletedDataSetInfo>>
     where
@@ -2480,7 +2510,7 @@ impl Blockstore {
             Some(shred_recovery_context),
             pinnable_slice,
             write_batch,
-            handle_completed_fec_set,
+            handle_insert_event,
             metrics,
         )?;
 
@@ -2575,7 +2605,7 @@ impl Blockstore {
             None, // should_recover_shreds
             pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |_| {},
             &mut BlockstoreInsertionMetrics::default(),
         )?;
 
@@ -2694,7 +2724,7 @@ impl Blockstore {
             None, // Skip recovery for locally produced shreds.
             pinnable_slice,
             write_batch,
-            |_, _| {},
+            |_| {},
             &mut BlockstoreInsertionMetrics::default(),
         )?;
         Ok(insert_results.completed_data_set_infos)
@@ -2727,7 +2757,7 @@ impl Blockstore {
                 None, // Skip recovery for this direct insertion path.
                 &mut pinnable_slice,
                 &mut write_batch,
-                |_, _| {},
+                |_| {},
                 &mut BlockstoreInsertionMetrics::default(),
             )
             .unwrap();
@@ -3121,6 +3151,10 @@ impl Blockstore {
                 just_inserted_shreds,
                 write_batch,
             )?;
+        }
+
+        if location == BlockLocation::Original && slot_meta.received == 0 {
+            slot_meta_entry.ingest_begin_ns = Some(monotonic_timestamp_ns());
         }
 
         let completed_data_sets = self.insert_data_shred(
@@ -6141,7 +6175,6 @@ impl Blockstore {
         let mut should_signal = false;
         let mut newly_completed_slots_with_last_index = vec![];
         let mut update_parent_signals = Vec::new();
-        let completed_slots_senders = self.completed_slots_senders.lock().unwrap();
 
         // Check if any metadata was changed, if so, insert the new version of the
         // metadata into the write batch
@@ -6152,10 +6185,7 @@ impl Blockstore {
             let meta_backup = &slot_meta_entry.old_slot_meta;
 
             // Only for original blocks that are now complete, notify receivers
-            if location == BlockLocation::Original
-                && !completed_slots_senders.is_empty()
-                && is_newly_completed_slot(meta, meta_backup)
-            {
+            if location == BlockLocation::Original && is_newly_completed_slot(meta, meta_backup) {
                 newly_completed_slots_with_last_index.push((
                     slot,
                     meta.last_index
@@ -6467,7 +6497,7 @@ fn send_signals(
     completed_slots_senders: &[Sender<Vec<u64>>],
     update_parent_senders: &[UpdateParentSender],
     should_signal: bool,
-    newly_completed_slots: Vec<(u64, u64)>,
+    newly_completed_slots: &[(u64, u64)],
     update_parent_signals: Vec<UpdateParentSignal>,
 ) {
     if should_signal {
@@ -6486,8 +6516,8 @@ fn send_signals(
 
     if !completed_slots_senders.is_empty() && !newly_completed_slots.is_empty() {
         let slots: Vec<_> = newly_completed_slots
-            .into_iter()
-            .map(|(slot, _)| slot)
+            .iter()
+            .map(|&(slot, _)| slot)
             .collect();
         for signal in completed_slots_senders {
             let res = signal.try_send(slots.clone());
