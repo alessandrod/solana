@@ -15,3 +15,18 @@ pub struct FecSetCompleted {
     pub slot: Slot,
     pub fec_set_index: u32,
 }
+
+pub const INGEST_SLOT_EVENT_STREAM: StreamName =
+    agave_event_system::stream_name!("ingest.slot_event");
+
+/// Original-slot ingestion lifecycle, independent of replay success.
+/// Events are published after successful commits, with Begin before Complete.
+/// Timestamps are monotonic nanoseconds.
+#[event]
+#[derive(Debug, PartialEq, Eq)]
+pub enum IngestSlotEvent {
+    /// The first data shred was inserted into the write batch, including recovered data.
+    Begin { timestamp_ns: u64, slot: Slot },
+    /// All data through the slot's last shred have been committed to blockstore.
+    Complete { timestamp_ns: u64, slot: Slot },
+}

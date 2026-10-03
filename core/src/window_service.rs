@@ -3,7 +3,6 @@
 //!
 
 use {
-    self::events::FecSetCompleted,
     crate::{
         completed_data_sets_service::CompletedDataSetsSender,
         repair::{
@@ -13,6 +12,7 @@ use {
             },
         },
         result::{Error, Result},
+        window_service::events::{FecSetCompleted, IngestSlotEvent},
     },
     agave_event_system::{
         EventSystem, PublisherFactory, StreamConfig, monotonic_timestamp_ns, publisher::Publisher,
@@ -24,7 +24,8 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
         blockstore::{
-            Blockstore, BlockstoreInsertionMetrics, PossibleDuplicateShred, handle_duplicate_shred,
+            Blockstore, BlockstoreInsertionMetrics, PossibleDuplicateShred, ShredInsertEvent,
+            handle_duplicate_shred,
         },
         blockstore_db::{DBPinnableSlice, WriteBatch},
         blockstore_meta::BlockLocation,
@@ -189,7 +190,7 @@ fn run_insert<'db, F>(
     metrics: &mut BlockstoreInsertionMetrics,
     ws_metrics: &mut WindowServiceMetrics,
     completed_data_sets_sender: Option<&CompletedDataSetsSender>,
-    fec_set_publisher: &mut Publisher<FecSetCompleted>,
+    publishers: &mut IngestPublishers,
 ) -> Result<()>
 where
     F: Fn(PossibleDuplicateShred),
@@ -225,12 +226,28 @@ where
         pinnable_slice,
         write_batch,
         &handle_duplicate,
-        |slot, fec_set_index| {
-            let _ = fec_set_publisher.publish(&FecSetCompleted {
-                timestamp_ns: monotonic_timestamp_ns(),
+        |event| match event {
+            ShredInsertEvent::SlotBegin { slot, timestamp_ns } => {
+                let _ = publishers
+                    .slots
+                    .publish(&IngestSlotEvent::Begin { timestamp_ns, slot });
+            }
+            ShredInsertEvent::FecSetComplete {
                 slot,
                 fec_set_index,
-            });
+            } => {
+                let _ = publishers.fec_sets.publish(&FecSetCompleted {
+                    timestamp_ns: monotonic_timestamp_ns(),
+                    slot,
+                    fec_set_index,
+                });
+            }
+            ShredInsertEvent::SlotComplete { slot } => {
+                let _ = publishers.slots.publish(&IngestSlotEvent::Complete {
+                    timestamp_ns: monotonic_timestamp_ns(),
+                    slot,
+                });
+            }
         },
         metrics,
     )?;
@@ -240,6 +257,11 @@ where
     }
 
     Ok(())
+}
+
+struct IngestPublishers {
+    fec_sets: Publisher<FecSetCompleted>,
+    slots: Publisher<IngestSlotEvent>,
 }
 
 pub struct WindowServiceChannels {
@@ -303,6 +325,16 @@ impl WindowService {
                 },
             )
             .map_err(|err| format!("Failed to create FEC-set event stream: {err}"))?;
+        let slot_event_factory = event_system
+            .create_stream::<IngestSlotEvent>(
+                events::INGEST_SLOT_EVENT_STREAM,
+                StreamConfig {
+                    capacity: 1024,
+                    publisher_slots: 1,
+                    subscriber_slots: 8,
+                },
+            )
+            .map_err(|err| format!("Failed to create slot-ingest event stream: {err}"))?;
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
 
@@ -349,7 +381,7 @@ impl WindowService {
 
         let sharable_banks = bank_forks.read().unwrap().sharable_banks();
         let t_insert = Self::start_window_insert_thread(
-            fec_event_factory,
+            (fec_event_factory, slot_event_factory),
             exit,
             blockstore,
             sharable_banks,
@@ -396,7 +428,10 @@ impl WindowService {
     }
 
     fn start_window_insert_thread(
-        fec_event_factory: PublisherFactory<FecSetCompleted>,
+        (fec_event_factory, slot_event_factory): (
+            PublisherFactory<FecSetCompleted>,
+            PublisherFactory<IngestSlotEvent>,
+        ),
         exit: Arc<AtomicBool>,
         blockstore: Arc<Blockstore>,
         sharable_banks: SharableBanks,
@@ -410,9 +445,14 @@ impl WindowService {
         Builder::new()
             .name("solWinInsert".to_string())
             .spawn(move || {
-                let mut fec_set_publisher = fec_event_factory
-                    .try_create_publisher()
-                    .expect("fresh FEC-set stream has one publisher slot");
+                let mut publishers = IngestPublishers {
+                    fec_sets: fec_event_factory
+                        .try_create_publisher()
+                        .expect("fresh FEC-set stream has one publisher slot"),
+                    slots: slot_event_factory
+                        .try_create_publisher()
+                        .expect("fresh slot-ingest stream has one publisher slot"),
+                };
                 let thread_pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(get_thread_count().min(8))
                     // Use the current thread as one of the workers. This reduces overhead when the
@@ -453,7 +493,7 @@ impl WindowService {
                         &mut metrics,
                         &mut ws_metrics,
                         completed_data_sets_sender.as_ref(),
-                        &mut fec_set_publisher,
+                        &mut publishers,
                     ) {
                         ws_metrics.record_error(&e);
                         if Self::should_exit_on_error(e) {
@@ -504,7 +544,7 @@ impl WindowService {
 #[cfg(test)]
 mod test {
     use {
-        super::*,
+        crate::window_service::*,
         crossbeam_channel::bounded,
         rand::Rng,
         solana_entry::entry::{Entry, create_ticks},
