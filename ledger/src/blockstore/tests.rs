@@ -1955,8 +1955,9 @@ fn test_merkle_root_metas_coding() {
     let coding_shred = coding_shreds[index as usize].clone();
 
     let mut write_batch = blockstore.get_write_batch();
+    let mut publishers = IngestPublishers::default();
     let mut shred_insertion_tracker =
-        ShredInsertionTracker::new(coding_shreds.len(), &mut write_batch);
+        ShredInsertionTracker::new(coding_shreds.len(), &mut write_batch, &mut publishers);
     blockstore
         .check_insert_coding_shred(
             Cow::Borrowed(&coding_shred),
@@ -2013,8 +2014,9 @@ fn test_merkle_root_metas_coding() {
     let new_coding_shred = coding_shreds[(index + 1) as usize].clone();
 
     let mut write_batch = blockstore.get_write_batch();
+    let mut publishers = IngestPublishers::default();
     let mut shred_insertion_tracker =
-        ShredInsertionTracker::new(coding_shreds.len(), &mut write_batch);
+        ShredInsertionTracker::new(coding_shreds.len(), &mut write_batch, &mut publishers);
 
     assert!(matches!(
         blockstore.check_insert_coding_shred(
@@ -2150,8 +2152,9 @@ fn test_merkle_root_metas_data() {
     let data_shred = data_shreds[0].clone();
 
     let mut write_batch = blockstore.get_write_batch();
+    let mut publishers = IngestPublishers::default();
     let mut shred_insertion_tracker =
-        ShredInsertionTracker::new(data_shreds.len(), &mut write_batch);
+        ShredInsertionTracker::new(data_shreds.len(), &mut write_batch, &mut publishers);
     blockstore
         .check_insert_data_shred(
             Cow::Borrowed(&data_shred),
@@ -2208,8 +2211,9 @@ fn test_merkle_root_metas_data() {
     let new_data_shred = data_shreds[1].clone();
 
     let mut write_batch = blockstore.get_write_batch();
+    let mut publishers = IngestPublishers::default();
     let mut shred_insertion_tracker =
-        ShredInsertionTracker::new(data_shreds.len(), &mut write_batch);
+        ShredInsertionTracker::new(data_shreds.len(), &mut write_batch, &mut publishers);
 
     let insert_result = blockstore.check_insert_data_shred(
         Cow::Owned(new_data_shred),
@@ -2304,8 +2308,9 @@ fn test_merkle_root_metas_data() {
         .unwrap();
 
     let mut write_batch = blockstore.get_write_batch();
+    let mut publishers = IngestPublishers::default();
     let mut shred_insertion_tracker =
-        ShredInsertionTracker::new(data_shreds.len(), &mut write_batch);
+        ShredInsertionTracker::new(data_shreds.len(), &mut write_batch, &mut publishers);
     blockstore
         .check_insert_data_shred(
             Cow::Borrowed(&new_data_shred),
@@ -2381,7 +2386,9 @@ fn test_check_insert_coding_shred() {
     let coding_shred = code_shreds[0].clone();
 
     let mut write_batch = blockstore.get_write_batch();
-    let mut shred_insertion_tracker = ShredInsertionTracker::new(1, &mut write_batch);
+    let mut publishers = IngestPublishers::default();
+    let mut shred_insertion_tracker =
+        ShredInsertionTracker::new(1, &mut write_batch, &mut publishers);
     blockstore
         .check_insert_coding_shred(
             Cow::Borrowed(&coding_shred),
@@ -2445,7 +2452,9 @@ fn test_existing_shred_index_with_different_signature(
     assert_ne!(conflicting_shred.signature(), original_shred.signature());
 
     let mut write_batch = blockstore.get_write_batch();
-    let mut shred_insertion_tracker = ShredInsertionTracker::new(1, &mut write_batch);
+    let mut publishers = IngestPublishers::default();
+    let mut shred_insertion_tracker =
+        ShredInsertionTracker::new(1, &mut write_batch, &mut publishers);
     shred_insertion_tracker.stricter_shred_validation_from = stricter_shred_validation_from;
     let is_trusted = false;
     blockstore
@@ -2559,7 +2568,9 @@ fn test_existing_coding_shred_index_with_different_position(relabeled_first: boo
         (honest_shred, relabeled_shred)
     };
     let mut write_batch = blockstore.get_write_batch();
-    let mut shred_insertion_tracker = ShredInsertionTracker::new(1, &mut write_batch);
+    let mut publishers = IngestPublishers::default();
+    let mut shred_insertion_tracker =
+        ShredInsertionTracker::new(1, &mut write_batch, &mut publishers);
     let is_trusted = false;
     blockstore
         .check_insert_coding_shred(
@@ -2703,7 +2714,9 @@ fn test_mark_slot_dead_if_not_full() {
     };
 
     let mut write_batch = blockstore.get_write_batch();
-    let mut shred_insertion_tracker = ShredInsertionTracker::new(1, &mut write_batch);
+    let mut publishers = IngestPublishers::default();
+    let mut shred_insertion_tracker =
+        ShredInsertionTracker::new(1, &mut write_batch, &mut publishers);
 
     blockstore.mark_slot_dead_if_not_full(empty_slot, location, &mut shred_insertion_tracker);
     blockstore.mark_slot_dead_if_not_full(partial_slot, location, &mut shred_insertion_tracker);
