@@ -4725,6 +4725,7 @@ fn test_recovery() {
     let blockstore = Blockstore::open(ledger_path.path()).unwrap();
     let mut pinnable_slice = blockstore.new_pinnable_slice();
     let mut write_batch = blockstore.get_write_batch();
+    let mut insert_events = Vec::new();
 
     let slot = 1;
     let (data_shreds, coding_shreds) = setup_erasure_shreds(slot, 0, 100);
@@ -4750,10 +4751,27 @@ fn test_recovery() {
             )),
             &mut pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |event| insert_events.push(event),
             &mut BlockstoreInsertionMetrics::default(),
         )
         .unwrap();
+    let completed_slots = insert_events
+        .into_iter()
+        .filter(|event| matches!(event, ShredInsertEvent::SlotComplete { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed_slots,
+        vec![ShredInsertEvent::SlotComplete {
+            slot,
+            num_fec_sets: data_shreds
+                .iter()
+                .map(Shred::fec_set_index)
+                .dedup()
+                .count()
+                .try_into()
+                .unwrap(),
+        }]
+    );
     let shred_bufs: Vec<_> = data_shreds.iter().map(Shred::payload).cloned().collect();
 
     // Check all the data shreds were recovered
@@ -4797,7 +4815,7 @@ fn test_skip_alt_recovery() {
             None,
             &mut pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |_| {},
             &mut BlockstoreInsertionMetrics::default(),
         )
         .unwrap();
@@ -4825,7 +4843,7 @@ fn test_skip_alt_recovery() {
             )),
             &mut pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |_| {},
             &mut metrics,
         )
         .unwrap();
@@ -4919,7 +4937,7 @@ fn test_recovery_discards_unexpected_data_complete_shreds() {
             )),
             &mut pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |_| {},
             &mut metrics,
         )
         .unwrap();
@@ -6640,7 +6658,7 @@ fn test_get_double_merkle_root(use_alternate_location: bool) {
             None,
             &mut pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |_| {},
             &mut BlockstoreInsertionMetrics::default(),
         )
         .unwrap();
@@ -6739,7 +6757,7 @@ fn test_get_double_merkle_root(use_alternate_location: bool) {
             None,
             &mut pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |_| {},
             &mut BlockstoreInsertionMetrics::default(),
         )
         .unwrap();
@@ -6773,7 +6791,7 @@ fn insert_test_block_at_location(
             None,
             &mut pinnable_slice,
             &mut write_batch,
-            |_, _| {},
+            |_| {},
             &mut BlockstoreInsertionMetrics::default(),
         )
         .unwrap();
@@ -6925,7 +6943,7 @@ fn test_get_data_shreds_for_slot() {
                 None,
                 &mut pinnable_slice,
                 &mut write_batch,
-                |_, _| {},
+                |_| {},
                 &mut BlockstoreInsertionMetrics::default(),
             )
             .unwrap();
