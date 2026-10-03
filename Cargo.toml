@@ -654,3 +654,4 @@ codegen-units = 1
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "5ee1c6ec671d94db14ed9238eb99e59a84555aad" }
 librocksdb-sys = { git = "https://github.com/anza-xyz/rust-rocksdb", rev = "4dba80dfe9434e595a971f5b2985ff9ba4fb31e7" }
 rocksdb = { git = "https://github.com/anza-xyz/rust-rocksdb", rev = "4dba80dfe9434e595a971f5b2985ff9ba4fb31e7" }
+solana-sbpf = { path = "../sbpf" }

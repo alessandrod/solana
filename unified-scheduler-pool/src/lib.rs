@@ -23,6 +23,7 @@ use {
     crossbeam_channel::{
         self, Receiver, RecvError, RecvTimeoutError, SendError, Sender, never, select_biased,
     },
+    crossbeam_queue::SegQueue,
     dashmap::DashMap,
     derive_where::derive_where,
     log::*,
@@ -103,7 +104,7 @@ type AtomicSchedulerId = AtomicU64;
 /// - Shrink of pool if there are too many idle schedulers.
 /// - Invocation of timeouts registered by [`InstalledSchedulerPool::register_timeout_listener`].
 /// - The actual destruction of any retired schedulers including thread termination and the heavy
-///   `UsageQueueLoader` drop.
+///   `UsageQueueLoaderInner` drop.
 ///
 /// `SchedulerPool` (and [`PooledScheduler`] in this regard) must be accessed as a dyn trait from
 /// `solana-runtime`, because it contains some internal fields, whose types aren't available in
@@ -169,12 +170,6 @@ pub struct HandlerContext {
 }
 
 impl HandlerContext {
-    fn usage_queue_loader_for_newly_spawned(&self) -> UsageQueueLoader {
-        UsageQueueLoader::OwnedBySelf {
-            usage_queue_loader_inner: UsageQueueLoaderInner::new(Capability::FifoQueueing),
-        }
-    }
-
     fn clone_for_scheduler_thread(&self) -> Self {
         self.clone()
     }
@@ -218,20 +213,11 @@ const ARENA_DIRTY_BYTES_PURGE_THRESHOLD: usize = 10 * 1024 * 1024 * 1024;
 const ARENA_STATS_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_POOLING_DURATION: Duration = Duration::from_secs(180);
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(12);
-// Rough estimate of max UsageQueueLoader size in bytes:
+// Rough estimate of retained queue storage per scheduler, excluding map and index overhead:
 //   UsageFromTask * UsageQueue's capacity * DEFAULT_MAX_USAGE_QUEUE_COUNT
 //   16 bytes      * 128 items             * 262_144 entries               == 512 MiB
-// It's expected that there will be 2 or 3 pooled schedulers constantly when running against
-// mainnnet-beta. That means the total memory consumption for the idle close-to-be-trashed pooled
-// schedulers is set to 1.0 ~ 1.5 GiB. This value is chosen to maximize performance under the
-// normal cluster condition to avoid memory reallocation as much as possible. That said, it's not
-// likely this would allow unbounded memory growth when the cluster is unstable or under some kind
-// of attacks. That's because this limit is enforced at every slot and the UsageQueueLoader itself
-// is recreated without any entries at first, needing to repopulate by means of actual use to eat
-// the memory.
-//
-// Along the lines, this isn't problematic for the development settings (= solana-test-validator),
-// because UsageQueueLoader won't grow that much to begin with.
+// Pruning runs after successful sessions. The cache may exceed this count during a session or
+// while tasks still hold queues. Individual queues can also grow beyond their initial capacity.
 const DEFAULT_MAX_USAGE_QUEUE_COUNT: usize = 262_144;
 
 impl<S, TH> SchedulerPool<S, TH>
@@ -887,14 +873,13 @@ mod chained_channel {
 /// with automatic population on initial entry misses, fulfilling the Pubkey-UsageQueue 1-to-1
 /// mapping responsibility as documented by `UsageQueue`.
 ///
-/// Currently, the simplest implementation. This grows memory usage in unbounded way. Overgrown
-/// instance destruction is managed via `solScCleaner`. This struct is here to be put outside
-/// `solana-unified-scheduler-logic` for the crate's original intent (separation of concerns from
-/// the pure-logic-only crate). Some practical and mundane pruning will be implemented in this type.
+/// Each cached entry has one eviction candidate, recorded on insertion. Pruning requires exclusive
+/// access to the loader and removes the oldest queues that are no longer shared with tasks.
 #[derive(Debug)]
 struct UsageQueueLoaderInner {
     capability: Capability,
     usage_queues: DashMap<Pubkey, UsageQueue>,
+    eviction_candidates: SegQueue<Pubkey>,
 }
 
 impl UsageQueueLoaderInner {
@@ -902,55 +887,46 @@ impl UsageQueueLoaderInner {
         Self {
             capability,
             usage_queues: DashMap::default(),
+            eviction_candidates: SegQueue::new(),
         }
     }
 
     fn load(&self, address: Pubkey) -> UsageQueue {
         self.usage_queues
             .entry(address)
-            .or_insert_with(|| UsageQueue::new(&self.capability))
+            .or_insert_with(|| {
+                let queue = UsageQueue::new(&self.capability);
+                self.eviction_candidates.push(address);
+                queue
+            })
             .clone()
     }
 
-    fn count(&self) -> usize {
-        self.usage_queues.len()
-    }
-}
+    fn prune(&mut self, max_usage_queue_count: usize) -> usize {
+        let initial_count = self.eviction_candidates.len();
+        let mut remaining = initial_count;
 
-/// Thin wrapper to encapsulate ownership variation of UsageQueueLoaderInner across block
-/// verification and production. This is needed to provide a uniform interface for the overgrown
-/// check.
-#[derive(Debug)]
-enum UsageQueueLoader {
-    // UsageQueueLoader is owned by this wrapper itself; used by block verification.
-    OwnedBySelf {
-        usage_queue_loader_inner: UsageQueueLoaderInner,
-    },
-}
-
-impl UsageQueueLoader {
-    fn usage_queue_loader(&self) -> &UsageQueueLoaderInner {
-        match self {
-            Self::OwnedBySelf {
-                usage_queue_loader_inner,
-            } => usage_queue_loader_inner,
+        // Visit each initial candidate at most once so shared queues cannot prolong the pass.
+        for _ in 0..initial_count {
+            if remaining <= max_usage_queue_count {
+                break;
+            }
+            let address = self
+                .eviction_candidates
+                .pop_mut()
+                .expect("over-budget cache has eviction candidates");
+            if self
+                .usage_queues
+                .remove_if(&address, |_, queue| !queue.is_shared())
+                .is_some()
+            {
+                remaining = remaining.checked_sub(1).unwrap();
+            } else {
+                self.eviction_candidates.push_mut(address);
+            }
         }
-    }
 
-    fn load(&self, pubkey: Pubkey) -> UsageQueue {
-        self.usage_queue_loader().load(pubkey)
-    }
-
-    fn is_overgrown(&self, max_usage_queue_count: usize) -> bool {
-        // if self.usage_queue_loader().count() > max_usage_queue_count {
-        //     return true;
-        // }
-
-        match self {
-            Self::OwnedBySelf {
-                usage_queue_loader_inner: _,
-            } => false,
-        }
+        initial_count.checked_sub(remaining).unwrap()
     }
 }
 
@@ -999,9 +975,7 @@ fn disconnected<T>() -> Receiver<T> {
 /// condition can implicitly be signalled to the replay stage on further transaction scheduling or
 /// can explicitly be done so on the eventual `wait_for_termination()` by drops or timeouts.
 ///
-/// Lastly, scheduler can finally be _retired_ to be ready for thread termination due to various
-/// reasons like [`UsageQueueLoader`] being overgrown or many idling schedulers in the pool, in
-/// addition to the obvious reason of aborted scheduler.
+/// Lastly, schedulers are _retired_ for thread termination when aborted or left idle in the pool.
 ///
 #[derive(Debug)]
 pub struct PooledScheduler<TH: TaskHandler> {
@@ -1012,7 +986,7 @@ pub struct PooledScheduler<TH: TaskHandler> {
 #[derive(Debug)]
 pub struct PooledSchedulerInner<S: SpawnableScheduler<TH>, TH: TaskHandler> {
     thread_manager: ThreadManager<S, TH>,
-    usage_queue_loader: UsageQueueLoader,
+    usage_queue_loader: UsageQueueLoaderInner,
 }
 
 impl<S, TH> Drop for ThreadManager<S, TH>
@@ -1974,7 +1948,6 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
 pub trait SchedulerInner {
     fn id(&self) -> SchedulerId;
     fn is_trashed(&self) -> bool;
-    fn is_overgrown(&self) -> bool;
     fn discard_buffer(&self);
 }
 
@@ -2007,6 +1980,10 @@ impl<TH: TaskHandler> SpawnableScheduler<TH> for PooledScheduler<TH> {
             manager.end_session();
             manager.take_session_result_with_timings()
         };
+        if result_with_timings.0.is_ok() {
+            let max_usage_queue_count = self.inner.thread_manager.pool.max_usage_queue_count;
+            self.inner.usage_queue_loader.prune(max_usage_queue_count);
+        }
         (result_with_timings, self.inner)
     }
 
@@ -2028,7 +2005,7 @@ impl<TH: TaskHandler> SpawnableScheduler<TH> for PooledScheduler<TH> {
     ) -> Self {
         let mut thread_manager = ThreadManager::new(pool.clone());
         let handler_context = pool.create_handler_context();
-        let usage_queue_loader = handler_context.usage_queue_loader_for_newly_spawned();
+        let usage_queue_loader = UsageQueueLoaderInner::new(Capability::FifoQueueing);
         thread_manager.start_threads(context.clone(), result_with_timings, handler_context);
         let inner = Self::Inner {
             thread_manager,
@@ -2091,12 +2068,7 @@ where
     }
 
     fn is_trashed(&self) -> bool {
-        self.is_aborted() || self.is_overgrown()
-    }
-
-    fn is_overgrown(&self) -> bool {
-        self.usage_queue_loader
-            .is_overgrown(self.thread_manager.pool.max_usage_queue_count)
+        self.is_aborted()
     }
 
     fn discard_buffer(&self) {
@@ -2117,8 +2089,7 @@ where
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        crate::sleepless_testing,
+        crate::{sleepless_testing, *},
         agave_jemalloc::jemalloc::{Decay, Jemalloc},
         assert_matches::assert_matches,
         solana_clock::Slot,
@@ -2382,6 +2353,77 @@ mod tests {
     const SHORTENED_POOL_CLEANER_INTERVAL: Duration = Duration::from_millis(1);
 
     #[test]
+    fn test_usage_queue_loader_candidates() {
+        let mut loader = UsageQueueLoaderInner::new(Capability::FifoQueueing);
+        let addresses = (0..128).map(|_| Pubkey::new_unique()).collect::<Vec<_>>();
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                let loader = &loader;
+                let addresses = &addresses;
+                scope.spawn(move || {
+                    for address in addresses {
+                        loader.load(*address);
+                        loader.load(*address);
+                    }
+                });
+            }
+        });
+        assert_eq!(loader.usage_queues.len(), addresses.len());
+        assert_eq!(loader.eviction_candidates.len(), addresses.len());
+
+        assert_eq!(loader.prune(64), 64);
+        assert_eq!(loader.usage_queues.len(), 64);
+        assert_eq!(loader.eviction_candidates.len(), 64);
+
+        let evicted_address = addresses
+            .into_iter()
+            .find(|address| !loader.usage_queues.contains_key(address))
+            .unwrap();
+        loader.load(evicted_address);
+        assert_eq!(loader.usage_queues.len(), 65);
+        assert_eq!(loader.eviction_candidates.len(), 65);
+        assert_eq!(loader.prune(0), 65);
+        assert!(loader.usage_queues.is_empty());
+        assert!(loader.eviction_candidates.is_empty());
+    }
+
+    #[test]
+    fn test_usage_queue_loader_prune_shared() {
+        let mut loader = UsageQueueLoaderInner::new(Capability::FifoQueueing);
+        let address = Pubkey::new_unique();
+        let queue = loader.load(address);
+        let transaction = ReplayTransaction::from(system_transaction::transfer(
+            &Keypair::new(),
+            &address,
+            1,
+            Hash::default(),
+        ));
+        let task = SchedulingStateMachine::create_task(transaction, 0, &mut |address| {
+            loader.load(address)
+        });
+        loader.load(Pubkey::new_unique());
+        loader.load(Pubkey::new_unique());
+
+        // Even a task not yet submitted must retain its account's cached queue.
+        assert_eq!(loader.prune(0), 2);
+        assert_eq!(loader.usage_queues.len(), 3);
+        assert_eq!(loader.eviction_candidates.len(), 3);
+        assert_eq!(loader.prune(0), 0);
+        assert!(loader.usage_queues.contains_key(&address));
+
+        drop(task);
+        assert_eq!(loader.prune(0), 2);
+        assert!(queue.is_shared());
+        assert_eq!(loader.usage_queues.len(), 1);
+        assert_eq!(loader.eviction_candidates.len(), 1);
+
+        drop(queue);
+        assert_eq!(loader.prune(0), 1);
+        assert!(loader.usage_queues.is_empty());
+        assert!(loader.eviction_candidates.is_empty());
+    }
+
+    #[test]
     fn test_scheduler_drop_idle() {
         agave_logger::setup();
 
@@ -2451,74 +2493,68 @@ mod tests {
     }
 
     #[test]
-    fn test_scheduler_drop_overgrown() {
-        agave_logger::setup();
-
-        let _progress = sleepless_testing::setup(&[
-            &TestCheckPoint::BeforeTrashedSchedulerCleaned,
-            &CheckPoint::TrashedSchedulerCleaned(0),
-            &CheckPoint::TrashedSchedulerCleaned(1),
-            &TestCheckPoint::AfterTrashedSchedulerCleaned,
-        ]);
-
-        const REDUCED_MAX_USAGE_QUEUE_COUNT: usize = 1;
-        let pool_raw = DefaultSchedulerPool::do_new_for_verification(
+    fn test_scheduler_prune_and_reuse() {
+        const REDUCED_MAX_USAGE_QUEUE_COUNT: usize = 2;
+        let pool = DefaultSchedulerPool::do_new_for_verification(
             None,
             None,
             None,
             None,
             None,
-            SHORTENED_POOL_CLEANER_INTERVAL,
+            DEFAULT_POOL_CLEANER_INTERVAL,
             DEFAULT_MAX_POOLING_DURATION,
             REDUCED_MAX_USAGE_QUEUE_COUNT,
             DEFAULT_TIMEOUT_DURATION,
         );
-        let pool = pool_raw.clone();
-        let bank = Arc::new(Bank::default_for_tests());
-        let context1 = SchedulingContext::new(bank);
-        let context2 = context1.clone();
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config(10_000);
+        let bank = Arc::new(Bank::new_for_tests(&genesis_config));
+        let context = SchedulingContext::new(bank.clone());
+        let scheduler = pool.do_take_scheduler(context.clone());
+        let scheduler_id = scheduler.id();
+        let recipient = Pubkey::new_unique();
 
-        let small_scheduler = pool.do_take_scheduler(context1);
-        let small_scheduler_id = small_scheduler.id();
-        for _ in 0..REDUCED_MAX_USAGE_QUEUE_COUNT {
-            small_scheduler
-                .inner
-                .usage_queue_loader
-                .load(Pubkey::new_unique());
-        }
-        let big_scheduler = pool.do_take_scheduler(context2);
-        for _ in 0..REDUCED_MAX_USAGE_QUEUE_COUNT + 1 {
-            big_scheduler
-                .inner
-                .usage_queue_loader
-                .load(Pubkey::new_unique());
-        }
+        scheduler
+            .schedule_execution(
+                ReplayTransaction::from(system_transaction::transfer(
+                    &mint_keypair,
+                    &recipient,
+                    1,
+                    genesis_config.hash(),
+                )),
+                0,
+            )
+            .unwrap();
+        let (result_with_timings, inner) = scheduler.into_inner();
+        assert_matches!(result_with_timings.0, Ok(()));
+        assert_eq!(bank.get_balance(&recipient), 1);
+        assert_eq!(inner.usage_queue_loader.usage_queues.len(), 2);
+        assert_eq!(inner.usage_queue_loader.eviction_candidates.len(), 2);
+        Box::new(inner).return_to_pool();
 
-        assert_eq!(pool_raw.scheduler_inners.lock().unwrap().len(), 0);
-        assert_eq!(pool_raw.trashed_scheduler_inners.lock().unwrap().len(), 0);
-        Box::new(small_scheduler.into_inner().1).return_to_pool();
-        Box::new(big_scheduler.into_inner().1).return_to_pool();
-
-        // Block solScCleaner until we see trashed schedler...
-        assert_eq!(pool_raw.scheduler_inners.lock().unwrap().len(), 1);
-        assert_eq!(pool_raw.trashed_scheduler_inners.lock().unwrap().len(), 1);
-        sleepless_testing::at(TestCheckPoint::BeforeTrashedSchedulerCleaned);
-
-        // See the trashed scheduler gone only after solScCleaner did its job...
-        sleepless_testing::at(&TestCheckPoint::AfterTrashedSchedulerCleaned);
-        assert_eq!(pool_raw.scheduler_inners.lock().unwrap().len(), 1);
-        assert_eq!(pool_raw.trashed_scheduler_inners.lock().unwrap().len(), 0);
-        assert_eq!(
-            pool_raw
-                .scheduler_inners
-                .lock()
-                .unwrap()
-                .first()
-                .as_ref()
-                .map(|(inner, _pooled_at)| inner.id())
-                .unwrap(),
-            small_scheduler_id
-        );
+        let scheduler = pool.do_take_scheduler(context);
+        assert_eq!(scheduler.id(), scheduler_id);
+        scheduler
+            .schedule_execution(
+                ReplayTransaction::from(system_transaction::transfer(
+                    &mint_keypair,
+                    &recipient,
+                    2,
+                    genesis_config.hash(),
+                )),
+                1,
+            )
+            .unwrap();
+        let (result_with_timings, inner) = scheduler.into_inner();
+        assert_matches!(result_with_timings.0, Ok(()));
+        assert_eq!(bank.get_balance(&recipient), 3);
+        assert_eq!(inner.usage_queue_loader.usage_queues.len(), 2);
+        assert_eq!(inner.usage_queue_loader.eviction_candidates.len(), 2);
+        Box::new(inner).return_to_pool();
+        assert!(pool.trashed_scheduler_inners.lock().unwrap().is_empty());
     }
 
     const SHORTENED_TIMEOUT_DURATION: Duration = Duration::from_millis(1);
@@ -3877,10 +3913,6 @@ mod tests {
 
         fn is_trashed(&self) -> bool {
             false
-        }
-
-        fn is_overgrown(&self) -> bool {
-            unimplemented!()
         }
 
         fn discard_buffer(&self) {

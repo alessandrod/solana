@@ -1018,9 +1018,7 @@ impl UsageQueueInner {
 
 const_assert_eq!(mem::size_of::<TokenCell<UsageQueueInner>>(), 56);
 
-/// Scheduler's internal data for each address ([`Pubkey`](`solana_pubkey::Pubkey`)). Very
-/// opaque wrapper type; no methods just with [`::clone()`](Clone::clone) and
-/// [`::default()`](Default::default).
+/// Scheduler's opaque internal data for each address ([`Pubkey`](`solana_pubkey::Pubkey`)).
 ///
 /// It's the higher layer's responsibility to ensure to associate the same instance of UsageQueue
 /// for given Pubkey at the time of [task](Task) creation.
@@ -1031,6 +1029,14 @@ const_assert_eq!(mem::size_of::<UsageQueue>(), 8);
 impl UsageQueue {
     pub fn new(capability: &Capability) -> Self {
         Self(Arc::new(TokenCell::new(UsageQueueInner::new(capability))))
+    }
+
+    /// Returns whether another owner currently holds this queue.
+    ///
+    /// Eviction requires preventing concurrent cloning while checking and removing the cached
+    /// queue. This snapshot alone does not prevent another owner from acquiring it.
+    pub fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
     }
 }
 
