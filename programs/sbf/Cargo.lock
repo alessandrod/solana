@@ -8253,6 +8253,7 @@ name = "solana-runtime"
 version = "4.4.0"
 dependencies = [
  "agave-bls-cert-verify",
+ "agave-event-system",
  "agave-feature-set",
  "agave-fs",
  "agave-precompiles",
@@ -10202,6 +10203,7 @@ name = "solana-unified-scheduler-pool"
 version = "4.4.0"
 dependencies = [
  "agave-banking-stage-ingress-types",
+ "agave-event-system",
  "agave-jemalloc",
  "assert_matches",
  "crossbeam-channel",
