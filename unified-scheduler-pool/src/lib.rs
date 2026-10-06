@@ -14,6 +14,11 @@
 //! regarding to pooling and the actual use.
 
 use {
+    agave_event_system::{
+        PublisherFactory,
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
+    },
     agave_jemalloc::{
         group::ArenaGroup,
         jemalloc::{Arena, Jemalloc},
@@ -38,6 +43,7 @@ use {
             UninstalledScheduler, UninstalledSchedulerBox, initialized_result_with_timings,
         },
         prioritization_fee_cache::PrioritizationFeeCache,
+        replay_events::TransactionEvent,
         transaction_execution::{
             TransactionBatchWithIndexes, TransactionStatusSender, check_block_cost_limits,
             execute_batch,
@@ -164,6 +170,7 @@ pub struct HandlerContext {
     transaction_status_sender: Option<TransactionStatusSender>,
     replay_vote_sender: Option<ReplayVoteSender>,
     prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+    transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
 }
 
 impl HandlerContext {
@@ -184,6 +191,7 @@ struct CommonHandlerContext {
     transaction_status_sender: Option<TransactionStatusSender>,
     replay_vote_sender: Option<ReplayVoteSender>,
     prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+    transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
 }
 
 impl CommonHandlerContext {
@@ -193,6 +201,7 @@ impl CommonHandlerContext {
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
+            transaction_event_factory,
         } = self;
 
         HandlerContext {
@@ -201,6 +210,7 @@ impl CommonHandlerContext {
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
+            transaction_event_factory,
         }
     }
 }
@@ -241,6 +251,7 @@ where
         replay_vote_sender: Option<ReplayVoteSender>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         handler_thread_arenas: Option<ArenaGroup>,
+        transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
     ) -> Arc<Self> {
         Self::do_new(
             block_verification_handler_count,
@@ -249,6 +260,7 @@ where
             replay_vote_sender,
             prioritization_fee_cache,
             handler_thread_arenas,
+            transaction_event_factory,
             DEFAULT_POOL_CLEANER_INTERVAL,
             DEFAULT_MAX_POOLING_DURATION,
             DEFAULT_MAX_USAGE_QUEUE_COUNT,
@@ -271,6 +283,7 @@ where
             replay_vote_sender,
             prioritization_fee_cache,
             None,
+            None,
         )
     }
 
@@ -282,6 +295,7 @@ where
         replay_vote_sender: Option<ReplayVoteSender>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         handler_thread_arenas: Option<ArenaGroup>,
+        transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
         pool_cleaner_interval: Duration,
         max_pooling_duration: Duration,
         max_usage_queue_count: usize,
@@ -449,6 +463,7 @@ where
                 transaction_status_sender,
                 replay_vote_sender,
                 prioritization_fee_cache,
+                transaction_event_factory,
             },
             block_verification_handler_count,
             handler_thread_arenas,
@@ -1119,10 +1134,34 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         task: Task,
         handler_context: &HandlerContext,
         handler_timings: &Mutex<ExecuteTimings>,
+        mut publisher: Option<&mut Publisher<TransactionEvent>>,
     ) -> ExecutedTask {
         debug!("handling task at {:?}", thread::current());
         let mut timings = ExecuteTimings::default();
+        let bank = scheduling_context.bank();
+        if let Some(publisher) = publisher.as_deref_mut() {
+            let (tid, pid) = cached_thread_and_process_id();
+            let _ = publisher.publish(&TransactionEvent::ExecutionBegin {
+                pid,
+                tid,
+                timestamp_ns: monotonic_timestamp_ns(),
+                slot: bank.slot(),
+                bank_id: bank.bank_id().into(),
+                transaction_index: task.task_id().try_into().unwrap(),
+            });
+        }
         let result = TH::handle(&mut timings, scheduling_context, &task, handler_context);
+        if let Some(publisher) = publisher {
+            let (tid, pid) = cached_thread_and_process_id();
+            let _ = publisher.publish(&TransactionEvent::ExecutionComplete {
+                pid,
+                tid,
+                timestamp_ns: monotonic_timestamp_ns(),
+                slot: bank.slot(),
+                bank_id: bank.bank_id().into(),
+                transaction_index: task.task_id().try_into().unwrap(),
+            });
+        }
         handler_timings.lock().unwrap().accumulate(&timings);
         ExecutedTask { task, result }
     }
@@ -1642,6 +1681,10 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             //    `select_biased!`, which are sent from `.send_chained_channel()` in the scheduler
             //    thread for all-but-initial sessions.
             move || {
+                let mut transaction_publisher = handler_context
+                    .transaction_event_factory
+                    .as_ref()
+                    .and_then(PublisherFactory::try_create_publisher);
                 let _disable_tcache_on_exit = if let Some(arena) = assigned_arena {
                     if let Err(error) = arena.bind_current_thread_permanently() {
                         let current_thread = thread::current();
@@ -1710,6 +1753,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                         task,
                         &handler_context,
                         &handler_timings[thread_index],
+                        transaction_publisher.as_mut(),
                     );
                     if sender.send(Ok(executed_task)).is_err() {
                         warn!("handler_thread: scheduler thread aborted...");
@@ -2106,6 +2150,7 @@ mod tests {
                 replay_vote_sender,
                 prioritization_fee_cache,
                 None,
+                None,
                 pool_cleaner_interval,
                 max_pooling_duration,
                 max_usage_queue_count,
@@ -2128,6 +2173,7 @@ mod tests {
                 transaction_status_sender,
                 replay_vote_sender,
                 prioritization_fee_cache,
+                None,
                 None,
             )
         }
@@ -2273,6 +2319,7 @@ mod tests {
             None,
             None,
             Some(arenas),
+            None,
         );
         let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(10_000);
         let bank = Bank::new_for_tests(&genesis_config);
@@ -3496,7 +3543,7 @@ mod tests {
         let bank = Bank::new_for_tests(&genesis_config);
         let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
         let pool = SchedulerPool::<PooledScheduler<StallingHandler>, _>::new(
-            None, None, None, None, None, None,
+            None, None, None, None, None, None, None,
         );
 
         // This variable tracks the cumulative count of transactions since genesis, which is
