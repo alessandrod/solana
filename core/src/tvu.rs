@@ -78,6 +78,7 @@ use {
         bank_forks::BankForks,
         bank_forks_controller::{BankForksCommandReceiver, BankForksController},
         commitment::BlockCommitmentCache,
+        replay_events::ReplayEventFactories,
         snapshot_controller::SnapshotController,
         transaction_execution::TransactionStatusSender,
         validated_block_finalization::ValidatedBlockFinalizationCert,
@@ -150,6 +151,7 @@ pub struct TvuSockets {
 }
 
 pub struct TvuConfig {
+    pub replay_event_factories: Option<ReplayEventFactories>,
     pub blockstore_cleanup_strategy: BlockstoreCleanupStrategy,
     pub shred_version: u16,
     // Validators from which repairs are requested
@@ -169,6 +171,7 @@ pub struct TvuConfig {
 impl Default for TvuConfig {
     fn default() -> Self {
         Self {
+            replay_event_factories: None,
             blockstore_cleanup_strategy: BlockstoreCleanupStrategy::None,
             shred_version: 0,
             repair_validators: None,
@@ -605,6 +608,7 @@ impl Tvu {
         };
 
         let replay_stage_config = ReplayStageConfig {
+            replay_event_factories: tvu_config.replay_event_factories,
             vote_account: *vote_account,
             authorized_voter_keypairs,
             exit: exit.clone(),

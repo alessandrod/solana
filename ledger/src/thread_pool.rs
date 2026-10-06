@@ -8,7 +8,9 @@ use {
 };
 
 pub(crate) trait WorkerJob: Send + 'static {
-    fn run(self);
+    type Context;
+
+    fn run(self, context: &mut Self::Context);
 }
 
 pub(crate) struct WorkerPool<J: WorkerJob> {
@@ -21,18 +23,21 @@ impl<J: WorkerJob> WorkerPool<J> {
         thread_name_prefix: &str,
         num_workers: usize,
         job_queue_capacity: usize,
+        initialize: impl FnOnce() -> J::Context + Clone + Send + 'static,
     ) -> Self {
         assert_ne!(num_workers, 0, "worker pool must have at least one worker");
         let (job_sender, job_receiver) = bounded::<J>(job_queue_capacity);
         let worker_handles = (0..num_workers)
             .map(|index| {
                 let job_receiver = job_receiver.clone();
+                let initialize = initialize.clone();
                 thread::Builder::new()
                     .name(format!("{thread_name_prefix}{index:02}"))
                     .stack_size(2 * 1024 * 1024)
                     .spawn(move || {
+                        let mut context = initialize();
                         while let Ok(job) = job_receiver.recv() {
-                            job.run();
+                            job.run(&mut context);
                         }
                     })
                     .expect("failed to spawn worker thread")

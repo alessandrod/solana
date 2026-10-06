@@ -1,5 +1,4 @@
 use {
-    super::*,
     crate::{
         commitment_service::AggregateCommitmentService,
         consensus::{
@@ -8,7 +7,7 @@ use {
             tower_storage::{FileTowerStorage, NullTowerStorage},
             tree_diff::TreeDiff,
         },
-        replay_stage::ReplayStage,
+        replay_stage::*,
         vote_simulator::{self, VoteSimulator},
     },
     agave_votor_messages::{
@@ -151,8 +150,9 @@ impl ProcessActiveBanksContext {
         let (ancestor_hashes_replay_update_sender, _) = bounded(1024);
         let (votor_event_sender, _) = bounded(1024);
         let migration_status = Arc::new(MigrationStatus::default());
-        let replay_verification_worker_pool = ReplayVerificationWorkerPool::new(1);
+        let replay_verification_worker_pool = ReplayVerificationWorkerPool::new(1, None);
         Self {
+            replay_event_factories: None,
             bank_forks,
             blockstore,
             transaction_status_sender: None,
@@ -1168,6 +1168,7 @@ fn do_test_dead_slot_on_complete_bank(failure: CompleteBankFailure) {
                 &bank_progress.replay_stats,
                 &bank_progress.replay_progress,
                 &finalization_cert_sender,
+                &mut ReplayEventPublishers::default(),
             )),
         }
     };
@@ -1575,6 +1576,7 @@ where
             &bank1_progress.replay_stats,
             &bank1_progress.replay_progress,
             &finalization_cert_sender,
+            &mut ReplayEventPublishers::default(),
         )
         .and_then(|replay_tx_count| {
             let mut poh_verify_elapsed = 0;
@@ -6663,7 +6665,7 @@ fn test_initialize_progress_and_fork_choice_with_duplicates() {
     let bank_forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
     let bank0 = bank_forks.read().unwrap().get_with_scheduler(0).unwrap();
     let shred_version = compute_shred_version(&genesis_config.hash(), None);
-    let replay_verification_worker_pool = ReplayVerificationWorkerPool::new(1);
+    let replay_verification_worker_pool = ReplayVerificationWorkerPool::new(1, None);
 
     process_bank_0(
         &bank0,
@@ -6697,6 +6699,7 @@ fn test_initialize_progress_and_fork_choice_with_duplicates() {
         None,
         &mut ExecuteTimings::default(),
         &MigrationStatus::default(),
+        &mut ReplayEventPublishers::default(),
     )
     .unwrap();
 

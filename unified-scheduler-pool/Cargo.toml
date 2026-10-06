@@ -21,6 +21,7 @@ dev-context-only-utils = ["solana-runtime/dev-context-only-utils"]
 
 [dependencies]
 agave-banking-stage-ingress-types = { workspace = true }
+agave-event-system = { workspace = true }
 agave-jemalloc = { workspace = true, features = ["metrics"] }
 assert_matches = { workspace = true }
 crossbeam-channel = { workspace = true }

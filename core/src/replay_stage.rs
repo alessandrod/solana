@@ -93,6 +93,7 @@ use {
         commitment::BlockCommitmentCache,
         installed_scheduler_pool::BankWithScheduler,
         leader_schedule_utils::first_of_consecutive_leader_slots,
+        replay_events::{ReplayEventFactories, ReplayEventPublishers},
         snapshot_controller::SnapshotController,
         transaction_execution::TransactionStatusSender,
         vote_sender_types::{ReplayVoteMessage, ReplayVoteSender},
@@ -253,6 +254,7 @@ struct CompletedBankReplay {
 }
 
 struct ProcessActiveBanksContext {
+    replay_event_factories: Option<ReplayEventFactories>,
     bank_forks: Arc<RwLock<BankForks>>,
     blockstore: Arc<Blockstore>,
     transaction_status_sender: Option<TransactionStatusSender>,
@@ -423,6 +425,7 @@ impl PartitionInfo {
 }
 
 pub struct ReplayStageConfig {
+    pub replay_event_factories: Option<ReplayEventFactories>,
     pub vote_account: Pubkey,
     pub authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
     pub exit: Arc<AtomicBool>,
@@ -748,6 +751,7 @@ impl ReplayStage {
         receivers: ReplayReceivers,
     ) -> Result<Self, String> {
         let ReplayStageConfig {
+            replay_event_factories,
             vote_account,
             authorized_voter_keypairs,
             exit,
@@ -835,6 +839,10 @@ impl ReplayStage {
         *replay_highest_frozen.highest_frozen_slot.lock().unwrap() = highest_frozen_slot;
 
         let run_replay = move || {
+            let mut replay_event_publishers = replay_event_factories
+                .as_ref()
+                .map(ReplayEventFactories::create_publishers)
+                .unwrap_or_default();
             let mut slot_event_publisher = slot_event_factory
                 .try_create_publisher()
                 .expect("fresh replay stream has one publisher slot");
@@ -928,10 +936,13 @@ impl ReplayStage {
                     .expect("new rayon threadpool");
                 ForkReplayMode::Parallel(pool)
             };
-            let replay_verification_worker_pool =
-                ReplayVerificationWorkerPool::new(replay_transactions_threads.get());
+            let replay_verification_worker_pool = ReplayVerificationWorkerPool::new(
+                replay_transactions_threads.get(),
+                replay_event_factories.clone(),
+            );
 
             let process_active_banks_context = ProcessActiveBanksContext {
+                replay_event_factories,
                 bank_forks: bank_forks.clone(),
                 blockstore: blockstore.clone(),
                 transaction_status_sender: transaction_status_sender.clone(),
@@ -1048,6 +1059,7 @@ impl ReplayStage {
                     &mut replay_timing,
                     &footer_certs_sender,
                     &mut slot_event_publisher,
+                    &mut replay_event_publishers,
                 );
                 let did_complete_bank = !new_frozen_slots.is_empty();
                 replay_active_banks_time.stop();
@@ -3096,6 +3108,7 @@ impl ReplayStage {
         replay_stats: &RwLock<ReplaySlotStats>,
         replay_progress: &RwLock<ConfirmationProgress>,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
+        publishers: &mut ReplayEventPublishers,
     ) -> result::Result<usize, BlockstoreProcessorError> {
         let mut w_replay_stats = replay_stats.write().unwrap();
         let mut w_replay_progress = replay_progress.write().unwrap();
@@ -3119,6 +3132,7 @@ impl ReplayStage {
             Some(finalization_cert_sender),
             false,
             process_active_banks_context.migration_status.as_ref(),
+            publishers,
         )?;
         let tx_count_after = w_replay_progress.num_txs;
         let tx_count = tx_count_after - tx_count_before;
@@ -3768,6 +3782,7 @@ impl ReplayStage {
         process_active_banks_context: &ProcessActiveBanksContext,
         bank_replay_result_tracker: BankReplayResultTracker,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
+        publishers: &mut ReplayEventPublishers,
     ) -> (ReplaySlotFromBlockstore, Option<u64>) {
         let BankReplayResultTracker {
             mut replay_result,
@@ -3822,6 +3837,7 @@ impl ReplayStage {
             &replay_stats,
             &replay_progress,
             finalization_cert_sender,
+            publishers,
         );
         replay_blockstore_time.stop();
         replay_result.replay_result = Some(blockstore_result);
@@ -3840,6 +3856,7 @@ impl ReplayStage {
         bank_replay_result_trackers: Vec<BankReplayResultTracker>,
         replay_timing: &mut ReplayLoopTiming,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
+        publishers: &mut ReplayEventPublishers,
     ) -> Vec<ReplaySlotFromBlockstore> {
         match &process_active_banks_context.replay_mode {
             // Skip the overhead of the threadpool if there is only one bank to play
@@ -3850,25 +3867,35 @@ impl ReplayStage {
                     fork_thread_pool.install(|| {
                         bank_replay_result_trackers
                             .into_par_iter()
-                            .map(|bank_replay_result_tracker| {
-                                trace!(
-                                    "Replay active bank: slot {}, thread_idx {}",
-                                    bank_replay_result_tracker.replay_result.bank_slot,
-                                    fork_thread_pool.current_thread_index().unwrap_or_default()
-                                );
-                                let (replay_result, replay_blockstore_us) =
-                                    Self::replay_active_bank(
-                                        my_shred_version,
-                                        process_active_banks_context,
-                                        bank_replay_result_tracker,
-                                        finalization_cert_sender,
+                            .map_init(
+                                || {
+                                    process_active_banks_context
+                                        .replay_event_factories
+                                        .as_ref()
+                                        .map(ReplayEventFactories::create_publishers)
+                                        .unwrap_or_default()
+                                },
+                                |publishers, bank_replay_result_tracker| {
+                                    trace!(
+                                        "Replay active bank: slot {}, thread_idx {}",
+                                        bank_replay_result_tracker.replay_result.bank_slot,
+                                        fork_thread_pool.current_thread_index().unwrap_or_default()
                                     );
-                                if let Some(replay_blockstore_us) = replay_blockstore_us {
-                                    longest_replay_time_us
-                                        .fetch_max(replay_blockstore_us, Ordering::Relaxed);
-                                }
-                                replay_result
-                            })
+                                    let (replay_result, replay_blockstore_us) =
+                                        Self::replay_active_bank(
+                                            my_shred_version,
+                                            process_active_banks_context,
+                                            bank_replay_result_tracker,
+                                            finalization_cert_sender,
+                                            publishers,
+                                        );
+                                    if let Some(replay_blockstore_us) = replay_blockstore_us {
+                                        longest_replay_time_us
+                                            .fetch_max(replay_blockstore_us, Ordering::Relaxed);
+                                    }
+                                    replay_result
+                                },
+                            )
                             .collect()
                     });
                 // Accumulating time across all slots could inflate this number and make it seem like an
@@ -3890,6 +3917,7 @@ impl ReplayStage {
                         process_active_banks_context,
                         bank_replay_result_tracker,
                         finalization_cert_sender,
+                        publishers,
                     );
                     if let Some(replay_blockstore_us) = replay_blockstore_us {
                         replay_timing.replay_blockstore_us += replay_blockstore_us;
@@ -4391,6 +4419,7 @@ impl ReplayStage {
         replay_timing: &mut ReplayLoopTiming,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
         slot_event_publisher: &mut Publisher<SlotEvent>,
+        replay_event_publishers: &mut ReplayEventPublishers,
     ) -> Vec<Slot> /* completed slots */ {
         let bank_replay_result_trackers = Self::prepare_active_banks_for_replay(
             process_active_banks_context,
@@ -4410,6 +4439,7 @@ impl ReplayStage {
             bank_replay_result_trackers,
             replay_timing,
             finalization_cert_sender,
+            replay_event_publishers,
         );
 
         // Process replay results.
