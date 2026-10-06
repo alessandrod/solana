@@ -31,7 +31,7 @@ use {
         tpu::{Tpu, TpuSockets},
         tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
     },
-    agave_event_system::{EventSystem, stream_policy::StreamPolicy},
+    agave_event_system::{EventSystem, StreamConfig, stream_policy::StreamPolicy},
     agave_snapshots::{
         SnapshotInterval, snapshot_archive_info::SnapshotArchiveInfoGetter as _,
         snapshot_config::SnapshotConfig, snapshot_hash::StartingSnapshotHashes,
@@ -137,6 +137,10 @@ use {
         commitment::BlockCommitmentCache,
         dependency_tracker::DependencyTracker,
         prioritization_fee_cache::PrioritizationFeeCache,
+        replay_events::{
+            ENTRY_EVENT_STREAM, EntryEvent, ReplayEventFactories, TRANSACTION_EVENT_STREAM,
+            TransactionEvent,
+        },
         runtime_config::RuntimeConfig,
         snapshot_bank_utils,
         snapshot_controller::SnapshotController,
@@ -964,7 +968,7 @@ impl Validator {
                 transaction_status_service,
                 max_complete_transaction_status_slot,
             },
-            blockstore_process_options,
+            mut blockstore_process_options,
             blockstore_root_scan,
             pruned_banks_receiver,
             entry_notifier_service,
@@ -985,6 +989,28 @@ impl Validator {
         .map_err(ValidatorError::Other)?;
 
         let event_system = initialize_event_system(&blockstore)?;
+        let replay_stream_config = StreamConfig {
+            capacity: 1024,
+            publisher_slots: 256,
+            subscriber_slots: 8,
+        };
+        let replay_event_factories = ReplayEventFactories {
+            entries: event_system
+                .create_stream::<EntryEvent>(ENTRY_EVENT_STREAM, replay_stream_config)
+                .map_err(|err| {
+                    ValidatorError::Other(format!(
+                        "Failed to create replay entry-event stream: {err}"
+                    ))
+                })?,
+            transactions: event_system
+                .create_stream::<TransactionEvent>(TRANSACTION_EVENT_STREAM, replay_stream_config)
+                .map_err(|err| {
+                    ValidatorError::Other(format!(
+                        "Failed to create replay transaction-event stream: {err}"
+                    ))
+                })?,
+        };
+        blockstore_process_options.replay_event_factories = Some(replay_event_factories.clone());
 
         let migration_status = bank_forks.read().unwrap().migration_status();
 
@@ -1161,6 +1187,7 @@ impl Validator {
             transaction_status_sender.clone(),
             Some(replay_vote_sender.clone()),
             prioritization_fee_cache.clone(),
+            Some(replay_event_factories.transactions.clone()),
         );
         bank_forks
             .write()
@@ -1723,6 +1750,7 @@ impl Validator {
             bank_notification_sender.clone(),
             duplicate_confirmed_slots_receiver,
             TvuConfig {
+                replay_event_factories: Some(replay_event_factories),
                 blockstore_cleanup_strategy: config.blockstore_cleanup_strategy,
                 shred_version: node.info.shred_version(),
                 repair_validators: config.repair_validators.clone(),
