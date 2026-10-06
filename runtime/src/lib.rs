@@ -26,6 +26,7 @@ pub mod prioritization_fee;
 pub mod prioritization_fee_cache;
 mod read_optimized_dashmap;
 pub mod rent_collector;
+pub mod replay_events;
 mod reward_info;
 pub mod runtime_config;
 pub mod serde_snapshot;
