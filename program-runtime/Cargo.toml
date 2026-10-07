@@ -73,6 +73,9 @@ solana-transaction-context = { workspace = true }
 thiserror = { workspace = true }
 wincode = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 assert_matches = { workspace = true }
 libsecp256k1 = { workspace = true }

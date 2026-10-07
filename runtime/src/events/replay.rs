@@ -7,11 +7,16 @@ use {
         wincode_dynamic::{DynPrimitiveTy, PrimitiveTy},
     },
     solana_clock::Slot,
+    solana_svm::events::{InstructionExecutionEvent, TransactionProcessingEvent},
 };
 
 pub const ENTRY_EVENT_STREAM: StreamName = agave_event_system::stream_name!("replay.entry_event");
 pub const TRANSACTION_EVENT_STREAM: StreamName =
     agave_event_system::stream_name!("replay.transaction_event");
+pub const TRANSACTION_PROCESSING_STREAM: StreamName =
+    agave_event_system::stream_name!("replay.transaction_processing");
+pub const INSTRUCTION_EXECUTION_STREAM: StreamName =
+    agave_event_system::stream_name!("replay.instruction_execution");
 
 /// Entry lifecycle events observed by replay. Timestamps are monotonic nanoseconds.
 /// Entries are identified by `(bank_id, entry_index)`.
@@ -25,7 +30,6 @@ pub enum EntryEvent {
         slot: Slot,
         bank_id: u64,
         entry_index: u64,
-        starting_transaction_index: u64,
         num_transactions: u64,
     },
     PohVerified {
@@ -87,7 +91,8 @@ pub enum TransactionEvent {
         bank_id: u64,
         transaction_index: u64,
     },
-    /// The execution handler returned, including when it returned an error.
+    /// Transaction processing finished on the handler, including commit and synchronous notifications.
+    /// Excludes handoff to the scheduler and its final block-cost check.
     ExecutionComplete {
         pid: i32,
         tid: i32,
@@ -102,7 +107,7 @@ pub enum TransactionEvent {
 #[derive(Clone, Debug)]
 pub struct ReplayEventFactories {
     pub entries: PublisherFactory<EntryEvent>,
-    pub transactions: PublisherFactory<TransactionEvent>,
+    pub transactions: TransactionEventFactories,
 }
 
 /// Publishers owned by one replay or verification thread.
@@ -117,7 +122,31 @@ impl ReplayEventFactories {
     pub fn create_publishers(&self) -> ReplayEventPublishers {
         ReplayEventPublishers {
             entries: self.entries.try_create_publisher(),
-            transactions: self.transactions.try_create_publisher(),
+            transactions: self.transactions.lifecycle.try_create_publisher(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TransactionEventFactories {
+    pub lifecycle: PublisherFactory<TransactionEvent>,
+    pub processing: PublisherFactory<TransactionProcessingEvent>,
+    pub instructions: PublisherFactory<InstructionExecutionEvent>,
+}
+
+#[derive(Debug, Default)]
+pub struct TransactionEventPublishers {
+    pub lifecycle: Option<Publisher<TransactionEvent>>,
+    pub processing: Option<Publisher<TransactionProcessingEvent>>,
+    pub instructions: Option<Publisher<InstructionExecutionEvent>>,
+}
+
+impl TransactionEventFactories {
+    pub fn create_publishers(&self) -> TransactionEventPublishers {
+        TransactionEventPublishers {
+            lifecycle: self.lifecycle.try_create_publisher(),
+            processing: self.processing.try_create_publisher(),
+            instructions: self.instructions.try_create_publisher(),
         }
     }
 }

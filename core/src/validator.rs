@@ -138,11 +138,11 @@ use {
         bank_forks_controller::BankForksControllerHandle,
         commitment::BlockCommitmentCache,
         dependency_tracker::DependencyTracker,
-        prioritization_fee_cache::PrioritizationFeeCache,
-        replay_events::{
-            ENTRY_EVENT_STREAM, EntryEvent, ReplayEventFactories, TRANSACTION_EVENT_STREAM,
-            TransactionEvent,
+        events::replay::{
+            ENTRY_EVENT_STREAM, INSTRUCTION_EXECUTION_STREAM, ReplayEventFactories,
+            TRANSACTION_EVENT_STREAM, TRANSACTION_PROCESSING_STREAM, TransactionEventFactories,
         },
+        prioritization_fee_cache::PrioritizationFeeCache,
         runtime_config::RuntimeConfig,
         snapshot_bank_utils,
         snapshot_controller::SnapshotController,
@@ -994,22 +994,30 @@ impl Validator {
         .map_err(ValidatorError::Other)?;
 
         let event_system = initialize_event_system(&blockstore)?;
-        let replay_stream_config = StreamConfig {
+        let event_stream_config = StreamConfig {
             capacity: 100_000,
             publisher_slots: 256,
             subscriber_slots: 8,
         };
         let replay_event_factories = ReplayEventFactories {
-            entries: create_event_stream::<EntryEvent>(
-                &event_system,
-                ENTRY_EVENT_STREAM,
-                replay_stream_config,
-            ),
-            transactions: create_event_stream::<TransactionEvent>(
-                &event_system,
-                TRANSACTION_EVENT_STREAM,
-                replay_stream_config,
-            ),
+            entries: create_event_stream(&event_system, ENTRY_EVENT_STREAM, event_stream_config),
+            transactions: TransactionEventFactories {
+                lifecycle: create_event_stream(
+                    &event_system,
+                    TRANSACTION_EVENT_STREAM,
+                    event_stream_config,
+                ),
+                processing: create_event_stream(
+                    &event_system,
+                    TRANSACTION_PROCESSING_STREAM,
+                    event_stream_config,
+                ),
+                instructions: create_event_stream(
+                    &event_system,
+                    INSTRUCTION_EXECUTION_STREAM,
+                    event_stream_config,
+                ),
+            },
         };
         blockstore_process_options.replay_event_factories = Some(replay_event_factories.clone());
 
