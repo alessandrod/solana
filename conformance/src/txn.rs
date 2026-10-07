@@ -172,6 +172,7 @@ pub fn execute_txn_proto(context: &ProtoTxnContext) -> ProtoTxnResult {
         enable_log_recording: true,
         enable_return_data_recording: true,
         enable_transaction_balance_recording: false,
+        instruction_callback: None,
     };
     let processing_config = TransactionProcessingConfig {
         recording_config,

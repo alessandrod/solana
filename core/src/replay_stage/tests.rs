@@ -2832,7 +2832,13 @@ fn test_clear_slots_clears_status_cache_for_removed_bank() {
     assert!(bank_forks.read().unwrap().get(1).is_none());
     assert!(bank1.get_signature_status(&transfer_signature).is_some());
 
-    ReplayStage::clear_slots(&mut Publisher::stub(), [1], &bank_forks, &mut progress, &mut Vec::new());
+    ReplayStage::clear_slots(
+        &mut Publisher::stub(),
+        [1],
+        &bank_forks,
+        &mut progress,
+        &mut Vec::new(),
+    );
 
     assert!(bank1.get_signature_status(&transfer_signature).is_none());
 }

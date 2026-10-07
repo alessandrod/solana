@@ -2,9 +2,7 @@
 
 use {
     crate::{
-        repair::{
-            repair_service::OutstandingShredRepairs, serve_repair::ServeRepair,
-        },
+        repair::{repair_service::OutstandingShredRepairs, serve_repair::ServeRepair},
         shred_fetch_stage::events::ShredReceived,
     },
     agave_event_system::{EventSystem, PublisherFactory, StreamConfig, publisher::Publisher},

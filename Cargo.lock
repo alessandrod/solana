@@ -9646,6 +9646,7 @@ dependencies = [
  "bincode",
  "cfg-if 1.0.4",
  "itertools 0.15.0",
+ "libc",
  "libsecp256k1",
  "log",
  "openssl",

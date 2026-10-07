@@ -125,7 +125,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "nix",
- "shaq",
+ "shaq 4.4.0",
  "thiserror 2.0.21",
  "wincode",
  "wincode-dynamic",
@@ -6488,7 +6488,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_bytes",
- "shaq",
+ "shaq 5.0.0",
  "signal-hook",
  "slab",
  "smallvec",
@@ -7253,6 +7253,7 @@ dependencies = [
 name = "solana-ledger"
 version = "4.4.0-beta.1"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -7763,6 +7764,7 @@ dependencies = [
  "bincode",
  "cfg-if 1.0.4",
  "itertools 0.15.0",
+ "libc",
  "log",
  "qualifier_attr",
  "rand 0.9.4",
@@ -8173,6 +8175,7 @@ name = "solana-runtime"
 version = "4.4.0-beta.1"
 dependencies = [
  "agave-bls-cert-verify",
+ "agave-event-system",
  "agave-feature-set",
  "agave-fs",
  "agave-precompiles",
@@ -10122,6 +10125,7 @@ name = "solana-unified-scheduler-pool"
 version = "4.4.0-beta.1"
 dependencies = [
  "agave-banking-stage-ingress-types",
+ "agave-event-system",
  "assert_matches",
  "crossbeam-channel",
  "dashmap",

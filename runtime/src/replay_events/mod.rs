@@ -1,7 +1,10 @@
 use {
+    crate::replay_events::execution::{InstructionExecutionEvent, TransactionExecutionEvent},
     agave_event_system::{PublisherFactory, event, publisher::Publisher, stream_name::StreamName},
     solana_clock::Slot,
 };
+
+pub mod execution;
 
 pub const ENTRY_EVENT_STREAM: StreamName = agave_event_system::stream_name!("replay.entry_event");
 pub const TRANSACTION_EVENT_STREAM: StreamName =
@@ -67,7 +70,7 @@ pub enum TransactionEvent {
 #[derive(Clone, Debug)]
 pub struct ReplayEventFactories {
     pub entries: PublisherFactory<EntryEvent>,
-    pub transactions: PublisherFactory<TransactionEvent>,
+    pub transactions: TransactionEventFactories,
 }
 
 /// Publishers owned by one replay or verification thread.
@@ -82,7 +85,29 @@ impl ReplayEventFactories {
     pub fn create_publishers(&self) -> ReplayEventPublishers {
         ReplayEventPublishers {
             entries: self.entries.try_create_publisher(),
-            transactions: self.transactions.try_create_publisher(),
+            transactions: self.transactions.lifecycle.try_create_publisher(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TransactionEventFactories {
+    pub lifecycle: PublisherFactory<TransactionEvent>,
+    pub execution: PublisherFactory<TransactionExecutionEvent>,
+    pub instructions: PublisherFactory<InstructionExecutionEvent>,
+}
+
+#[derive(Debug, Default)]
+pub struct TransactionEventPublishers {
+    pub lifecycle: Option<Publisher<TransactionEvent>>,
+    pub instructions: Option<Publisher<InstructionExecutionEvent>>,
+}
+
+impl TransactionEventFactories {
+    pub fn create_publishers(&self) -> TransactionEventPublishers {
+        TransactionEventPublishers {
+            lifecycle: self.lifecycle.try_create_publisher(),
+            instructions: self.instructions.try_create_publisher(),
         }
     }
 }

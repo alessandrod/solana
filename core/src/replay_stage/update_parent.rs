@@ -195,7 +195,13 @@ fn try_restart_slot_from_update_parent(
         send_invalid_bank(&bank, replay_vote_sender);
         bank.bank_id()
     });
-    ReplayStage::clear_slots(slot_event_publisher, [slot], bank_forks, progress, async_verification_freelist);
+    ReplayStage::clear_slots(
+        slot_event_publisher,
+        [slot],
+        bank_forks,
+        progress,
+        async_verification_freelist,
+    );
     if let Some(cleared_bank_id) = cleared_bank_id {
         let update_parent = UpdateParentInfo::from_slot_meta(slot, &slot_meta)
             .expect("UpdateParent metadata must include a parent slot");
@@ -309,6 +315,7 @@ pub(super) fn process_soft_dead_slots(
 /// Handles UpdateParent signals by clearing slot state so replay restarts from
 /// the new parent. Skips live own-leader banks, slots replay has not started,
 /// and slots that already replayed past the UpdateParent marker.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_update_parent_interrupts(
     slot_event_publisher: &mut Publisher<SlotEvent>,
     my_pubkey: &Pubkey,
