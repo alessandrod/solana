@@ -7829,6 +7829,7 @@ dependencies = [
  "bincode",
  "cfg-if 1.0.4",
  "itertools 0.15.0",
+ "libc",
  "log",
  "qualifier_attr",
  "rand 0.9.4",
@@ -9578,6 +9579,7 @@ dependencies = [
 name = "solana-svm"
 version = "4.4.0-beta.1"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "ahash 0.8.12",
  "bincode",

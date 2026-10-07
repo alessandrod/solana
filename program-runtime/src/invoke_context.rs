@@ -192,6 +192,44 @@ impl<'a> EnvironmentConfig<'a> {
     }
 }
 
+#[inline]
+fn monotonic_timestamp_ns() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        use libc::{CLOCK_MONOTONIC, clock_gettime, timespec};
+
+        let mut timestamp = timespec::default();
+        // SAFETY: timestamp points to valid, writable timespec storage.
+        let result = unsafe { clock_gettime(CLOCK_MONOTONIC, &mut timestamp) };
+        assert_eq!(result, 0, "CLOCK_MONOTONIC must be available");
+
+        // Both timespec fields are at most 64 bits, so this arithmetic fits in i128.
+        #[allow(clippy::arithmetic_side_effects)]
+        let nanos = i128::from(timestamp.tv_sec) * 1_000_000_000 + i128::from(timestamp.tv_nsec);
+        nanos
+            .try_into()
+            .expect("monotonic timestamp must fit in u64 nanoseconds")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
+/// Recorded execution of an entered instruction frame. Intervals and compute units include nested calls.
+/// Timestamps use Linux's CLOCK_MONOTONIC and are zero on other targets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionExecutionDetails {
+    pub start_ns: u64,
+    pub end_ns: u64,
+    pub instruction_index: u16,
+    pub caller_index: Option<u16>,
+    pub program_id: Pubkey,
+    pub stack_height: u16,
+    pub executed_units: u64,
+    pub status: Result<(), InstructionError>,
+}
+
 /// Main pipeline from runtime to program execution.
 pub struct InvokeContext<'a, 'ix_data> {
     /// Information about the currently executing transaction.
@@ -211,6 +249,7 @@ pub struct InvokeContext<'a, 'ix_data> {
     pub memory_contexts: MemoryContexts,
     /// Pairs of index in TX instruction trace and VM register trace
     register_traces: Vec<(usize, Vec<[u64; 12]>)>,
+    instruction_callback: Option<&'a mut dyn FnMut(InstructionExecutionDetails)>,
     /// Debug port to use for this executing transaction.
     #[cfg(feature = "sbpf-debugger")]
     pub debug_port: Option<u16>,
@@ -236,9 +275,42 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             timings: ExecuteDetailsTimings::default(),
             memory_contexts: MemoryContexts::new(),
             register_traces: Vec::new(),
+            instruction_callback: None,
             #[cfg(feature = "sbpf-debugger")]
             debug_port: None,
         }
+    }
+
+    /// Reports completed invocations, including failures detected when popping the frame.
+    /// The callback runs synchronously, with callees reported before their callers.
+    pub fn set_instruction_callback(
+        &mut self,
+        callback: Option<&'a mut dyn FnMut(InstructionExecutionDetails)>,
+    ) {
+        self.instruction_callback = callback;
+    }
+
+    fn capture_instruction_execution(&self) -> Option<InstructionExecutionDetails> {
+        self.instruction_callback.as_ref().map(|_| {
+            let instruction = self
+                .transaction_context
+                .get_current_instruction_context()
+                .expect("instruction was pushed");
+            let caller_index = instruction.get_index_of_caller().try_into().unwrap();
+
+            InstructionExecutionDetails {
+                start_ns: monotonic_timestamp_ns(),
+                end_ns: 0,
+                instruction_index: instruction.get_index_in_trace().try_into().unwrap(),
+                caller_index: (caller_index != u16::MAX).then_some(caller_index),
+                program_id: *instruction
+                    .get_program_key()
+                    .expect("entered instruction has a program"),
+                stack_height: instruction.get_stack_height().try_into().unwrap(),
+                executed_units: 0,
+                status: Ok(()),
+            }
+        })
     }
 
     /// Push a stack frame onto the invocation stack
@@ -578,10 +650,21 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
     ) -> Result<(), InstructionError> {
         *compute_units_consumed = 0;
         self.push()?;
-        self.process_executable_chain(compute_units_consumed, timings)
+        let instruction = self.capture_instruction_execution();
+        let result = self
+            .process_executable_chain(compute_units_consumed, timings)
             // MUST pop if and only if `push` succeeded, independent of `result`.
             // Thus, the `.and()` instead of an `.and_then()`.
-            .and(self.pop())
+            .and(self.pop());
+        if let (Some(callback), Some(mut instruction)) =
+            (&mut self.instruction_callback, instruction)
+        {
+            instruction.end_ns = monotonic_timestamp_ns();
+            instruction.executed_units = *compute_units_consumed;
+            instruction.status = result.clone();
+            callback(instruction);
+        }
+        result
     }
 
     /// Processes a precompile instruction
@@ -593,12 +676,22 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         message_instruction_datas_iter: impl Iterator<Item = &'ix_data [u8]>,
     ) -> Result<(), InstructionError> {
         self.push()?;
+        let instruction = self.capture_instruction_execution();
         let instruction_datas: Vec<_> = message_instruction_datas_iter.collect();
-        self.environment_config
+        let result = self
+            .environment_config
             .epoch_stake_callback
             .process_precompile(program_id, instruction_data, instruction_datas)
             .map_err(InstructionError::from)
-            .and(self.pop())
+            .and(self.pop());
+        if let (Some(callback), Some(mut instruction)) =
+            (&mut self.instruction_callback, instruction)
+        {
+            instruction.end_ns = monotonic_timestamp_ns();
+            instruction.status = result.clone();
+            callback(instruction);
+        }
+        result
     }
 
     /// Calls the instruction's program entrypoint method
@@ -768,7 +861,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
     }
 
     /// Get cached stake for the epoch vote account.
-    pub fn get_epoch_stake_for_vote_account(&self, pubkey: &'a Pubkey) -> u64 {
+    pub fn get_epoch_stake_for_vote_account(&self, pubkey: &Pubkey) -> u64 {
         self.environment_config
             .epoch_stake_callback
             .get_epoch_stake_for_vote_account(pubkey)

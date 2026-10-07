@@ -14,11 +14,7 @@
 //! regarding to pooling and the actual use.
 
 use {
-    agave_event_system::{
-        PublisherFactory,
-        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
-        publisher::Publisher,
-    },
+    agave_event_system::event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
     assert_matches::assert_matches,
     crossbeam_channel::{
         self, Receiver, RecvError, RecvTimeoutError, SendError, Sender, never, select_biased,
@@ -30,19 +26,24 @@ use {
     solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_runtime::{
+        events::replay::{TransactionEvent, TransactionEventFactories, TransactionEventPublishers},
         installed_scheduler_pool::{
             InstalledScheduler, InstalledSchedulerBox, InstalledSchedulerPool, ResultWithTimings,
             ScheduleResult, SchedulerAborted, SchedulerId, SchedulingContext, TimeoutListener,
             UninstalledScheduler, UninstalledSchedulerBox, initialized_result_with_timings,
         },
         prioritization_fee_cache::PrioritizationFeeCache,
-        replay_events::TransactionEvent,
         transaction_execution::{
-            TransactionBatchWithIndexes, TransactionStatusSender, execute_batch,
+            ExecutionCallbacks, TransactionBatchWithIndexes, TransactionStatusSender,
+            execute_batch,
         },
         vote_sender_types::{ReplayVoteSendType, ReplayVoteSender},
     },
     solana_runtime_transaction::runtime_transaction::ReplayTransaction,
+    solana_svm::events::{
+        ExecutionEventContext, TransactionProcessingDetails, publish_instruction_execution,
+        publish_transaction_processing,
+    },
     solana_svm_timings::ExecuteTimings,
     solana_transaction_error::{TransactionError, TransactionResult as Result},
     solana_unified_scheduler_logic::{
@@ -128,26 +129,14 @@ pub struct SchedulerPool<S: SpawnableScheduler<TH>, TH: TaskHandler> {
     _phantom: PhantomData<TH>,
 }
 
-#[derive(derive_more::Debug, Clone)]
+#[derive(derive_more::Debug)]
 pub struct HandlerContext {
-    thread_count: usize,
     log_messages_bytes_limit: Option<usize>,
     transaction_status_sender: Option<TransactionStatusSender>,
     replay_vote_sender: Option<ReplayVoteSender>,
     prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
-    transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
-}
-
-impl HandlerContext {
-    fn usage_queue_loader_for_newly_spawned(&self) -> UsageQueueLoader {
-        UsageQueueLoader::OwnedBySelf {
-            usage_queue_loader_inner: UsageQueueLoaderInner::new(Capability::FifoQueueing),
-        }
-    }
-
-    fn clone_for_scheduler_thread(&self) -> Self {
-        self.clone()
-    }
+    event_publishers: TransactionEventPublishers,
+    processing_details: Option<TransactionProcessingDetails>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,11 +145,11 @@ struct CommonHandlerContext {
     transaction_status_sender: Option<TransactionStatusSender>,
     replay_vote_sender: Option<ReplayVoteSender>,
     prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
-    transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
+    transaction_event_factory: Option<TransactionEventFactories>,
 }
 
 impl CommonHandlerContext {
-    fn into_handler_context(self, thread_count: usize) -> HandlerContext {
+    fn into_handler_context(self) -> HandlerContext {
         let Self {
             log_messages_bytes_limit,
             transaction_status_sender,
@@ -170,12 +159,15 @@ impl CommonHandlerContext {
         } = self;
 
         HandlerContext {
-            thread_count,
             log_messages_bytes_limit,
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
-            transaction_event_factory,
+            processing_details: None,
+            event_publishers: transaction_event_factory
+                .as_ref()
+                .map(TransactionEventFactories::create_publishers)
+                .unwrap_or_default(),
         }
     }
 }
@@ -213,7 +205,7 @@ where
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: Option<ReplayVoteSender>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
-        transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
+        transaction_event_factory: Option<TransactionEventFactories>,
     ) -> Arc<Self> {
         Self::do_new(
             block_verification_handler_count,
@@ -254,7 +246,7 @@ where
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: Option<ReplayVoteSender>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
-        transaction_event_factory: Option<PublisherFactory<TransactionEvent>>,
+        transaction_event_factory: Option<TransactionEventFactories>,
         pool_cleaner_interval: Duration,
         max_pooling_duration: Duration,
         max_usage_queue_count: usize,
@@ -448,16 +440,6 @@ where
         self.scheduler_inners.lock().expect("not poisoned").len()
     }
 
-    fn create_handler_context(&self) -> HandlerContext {
-        let thread_count = self.block_verification_handler_count;
-
-        let thread_count = thread_count.unwrap_or(Self::default_handler_count());
-        assert!(thread_count >= 1);
-        self.common_handler_context
-            .clone()
-            .into_handler_context(thread_count)
-    }
-
     pub fn default_handler_count() -> usize {
         Self::calculate_default_handler_count(
             thread::available_parallelism()
@@ -559,7 +541,7 @@ pub trait TaskHandler: Send + Sync + Debug + Sized + 'static {
         timings: &mut ExecuteTimings,
         scheduling_context: &SchedulingContext,
         task: &Task,
-        handler_context: &HandlerContext,
+        handler_context: &mut HandlerContext,
     );
 }
 
@@ -572,7 +554,7 @@ impl TaskHandler for DefaultTaskHandler {
         timings: &mut ExecuteTimings,
         scheduling_context: &SchedulingContext,
         task: &Task,
-        handler_context: &HandlerContext,
+        handler_context: &mut HandlerContext,
     ) {
         let bank = scheduling_context.bank();
         let transaction = task.transaction();
@@ -586,6 +568,37 @@ impl TaskHandler for DefaultTaskHandler {
             transaction_indexes,
         };
 
+        let record_instructions = handler_context
+            .event_publishers
+            .instructions
+            .as_mut()
+            .is_some_and(|publisher| publisher.is_enabled());
+        let record_processing = handler_context
+            .event_publishers
+            .processing
+            .as_mut()
+            .is_some_and(|publisher| publisher.is_enabled());
+        let mut on_instruction = |_, instruction| {
+            publish_instruction_execution(
+                handler_context
+                    .event_publishers
+                    .instructions
+                    .as_mut()
+                    .unwrap(),
+                ExecutionEventContext {
+                    slot: bank.slot(),
+                    bank_id: bank.bank_id().into(),
+                    trace_id: task_id.try_into().unwrap(),
+                    attempt: 0,
+                },
+                instruction,
+            );
+        };
+        let mut on_transaction = |_, details| handler_context.processing_details = Some(details);
+        let callbacks = ExecutionCallbacks {
+            instructions: record_instructions.then_some(&mut on_instruction),
+            transactions: record_processing.then_some(&mut on_transaction),
+        };
         *result = execute_batch(
             &batch_with_indexes,
             bank,
@@ -598,6 +611,7 @@ impl TaskHandler for DefaultTaskHandler {
             timings,
             handler_context.log_messages_bytes_limit,
             handler_context.prioritization_fee_cache.as_deref(),
+            callbacks,
         );
         sleepless_testing::at(CheckPoint::TaskHandled(task_id));
     }
@@ -1034,12 +1048,13 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
     fn execute_task_with_handler(
         scheduling_context: &SchedulingContext,
         executed_task: &mut Box<ExecutedTask>,
-        handler_context: &HandlerContext,
-        mut publisher: Option<&mut Publisher<TransactionEvent>>,
+        handler_context: &mut HandlerContext,
     ) {
         debug!("handling task at {:?}", thread::current());
         let bank = scheduling_context.bank();
-        if let Some(publisher) = publisher.as_deref_mut() {
+        if let Some(publisher) = &mut handler_context.event_publishers.lifecycle
+            && publisher.is_enabled()
+        {
             let (tid, pid) = cached_thread_and_process_id();
             let _ = publisher.publish(&TransactionEvent::ExecutionBegin {
                 pid,
@@ -1057,16 +1072,43 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             &executed_task.task,
             handler_context,
         );
-        if let Some(publisher) = publisher {
-            let (tid, pid) = cached_thread_and_process_id();
-            let _ = publisher.publish(&TransactionEvent::ExecutionComplete {
-                pid,
-                tid,
-                timestamp_ns: monotonic_timestamp_ns(),
-                slot: bank.slot(),
-                bank_id: bank.bank_id().into(),
-                transaction_index: executed_task.task.task_id().try_into().unwrap(),
-            });
+        let lifecycle_publisher = handler_context
+            .event_publishers
+            .lifecycle
+            .as_mut()
+            .and_then(|publisher| publisher.is_enabled().then_some(publisher));
+        let processing_event = handler_context
+            .event_publishers
+            .processing
+            .as_mut()
+            .and_then(|publisher| publisher.is_enabled().then_some(publisher))
+            .zip(handler_context.processing_details.take());
+        if lifecycle_publisher.is_some() || processing_event.is_some() {
+            let timestamp_ns = monotonic_timestamp_ns();
+            if let Some(publisher) = lifecycle_publisher {
+                let (tid, pid) = cached_thread_and_process_id();
+                let _ = publisher.publish(&TransactionEvent::ExecutionComplete {
+                    pid,
+                    tid,
+                    timestamp_ns,
+                    slot: bank.slot(),
+                    bank_id: bank.bank_id().into(),
+                    transaction_index: executed_task.task.task_id().try_into().unwrap(),
+                });
+            }
+            if let Some((publisher, details)) = processing_event {
+                publish_transaction_processing(
+                    publisher,
+                    ExecutionEventContext {
+                        slot: bank.slot(),
+                        bank_id: bank.bank_id().into(),
+                        trace_id: executed_task.task.task_id().try_into().unwrap(),
+                        attempt: 0,
+                    },
+                    timestamp_ns,
+                    &details,
+                );
+            }
         }
     }
 
@@ -1157,7 +1199,6 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         &mut self,
         context: SchedulingContext,
         mut result_with_timings: ResultWithTimings,
-        handler_context: HandlerContext,
     ) {
         let mut current_slot = context.slot();
         let (mut is_finished, mut session_ending) = (false, false);
@@ -1248,6 +1289,13 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             crossbeam_channel::unbounded::<HandlerResult>();
         let (finished_idle_task_sender, finished_idle_task_receiver) =
             crossbeam_channel::unbounded::<HandlerResult>();
+        let handler_count = self
+            .pool
+            .block_verification_handler_count
+            .unwrap_or_else(SchedulerPool::<S, TH>::default_handler_count);
+        assert!(handler_count >= 1);
+        let handler_timings: HandlerTimings =
+            (0..handler_count).map(|_| CachePadded::default()).collect();
 
         assert_matches!(self.session_result_with_timings, None);
 
@@ -1259,7 +1307,6 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         // 5. the handler thread reply back to the scheduler thread as an executed task.
         // 6. the scheduler thread post-processes the executed task.
         let scheduler_main_loop = {
-            let handler_context = handler_context.clone_for_scheduler_thread();
             let session_result_sender = self.session_result_sender.clone();
             // Taking new_task_receiver here is important to ensure there's a single receiver. In
             // this way, the replay stage will get .send() failures reliably, after this scheduler
@@ -1468,10 +1515,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                                 // Before that, propagate new SchedulingContext to handler threads
                                 current_slot = new_context.slot();
                                 runnable_task_sender
-                                    .send_chained_channel(
-                                        &new_context,
-                                        handler_context.thread_count,
-                                    )
+                                    .send_chained_channel(&new_context, handler_count)
                                     .unwrap();
 
                                 break;
@@ -1521,7 +1565,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         };
 
         let handler_main_loop = || {
-            let handler_context = handler_context.clone();
+            let handler_context = self.pool.common_handler_context.clone();
             let mut runnable_task_receiver = runnable_task_receiver.clone();
             let finished_blocked_task_sender = finished_blocked_task_sender.clone();
             let finished_idle_task_sender = finished_idle_task_sender.clone();
@@ -1535,10 +1579,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             //    `select_biased!`, which are sent from `.send_chained_channel()` in the scheduler
             //    thread for all-but-initial sessions.
             move || {
-                let mut transaction_publisher = handler_context
-                    .transaction_event_factory
-                    .as_ref()
-                    .and_then(PublisherFactory::try_create_publisher);
+                let mut handler_context = handler_context.into_handler_context();
                 loop {
                     let (task, sender) = select_biased! {
                         recv(runnable_task_receiver.for_select()) -> message => {
@@ -1581,8 +1622,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                     Self::execute_task_with_handler(
                         runnable_task_receiver.context(),
                         &mut task,
-                        &handler_context,
-                        transaction_publisher.as_mut(),
+                        &mut handler_context,
                     );
                     if sender.send(Ok(task)).is_err() {
                         warn!("handler_thread: scheduler thread aborted...");
@@ -1601,7 +1641,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                 .unwrap(),
         );
 
-        self.handler_threads = (0..handler_context.thread_count)
+        self.handler_threads = (0..handler_count)
             .map({
                 |thx| {
                     thread::Builder::new()
@@ -1827,9 +1867,10 @@ impl<TH: TaskHandler> SpawnableScheduler<TH> for PooledScheduler<TH> {
         result_with_timings: ResultWithTimings,
     ) -> Self {
         let mut thread_manager = ThreadManager::new(pool.clone());
-        let handler_context = pool.create_handler_context();
-        let usage_queue_loader = handler_context.usage_queue_loader_for_newly_spawned();
-        thread_manager.start_threads(context.clone(), result_with_timings, handler_context);
+        let usage_queue_loader = UsageQueueLoader::OwnedBySelf {
+            usage_queue_loader_inner: UsageQueueLoaderInner::new(Capability::FifoQueueing),
+        };
+        thread_manager.start_threads(context.clone(), result_with_timings);
         let inner = Self::Inner {
             thread_manager,
             usage_queue_loader,
@@ -2265,7 +2306,7 @@ mod tests {
                 timings: &mut ExecuteTimings,
                 _scheduling_context: &SchedulingContext,
                 _task: &Task,
-                _handler_context: &HandlerContext,
+                _handler_context: &mut HandlerContext,
             ) {
                 timings.metrics[ExecuteTimingType::CheckUs] += 123;
             }
@@ -2441,7 +2482,7 @@ mod tests {
             _timings: &mut ExecuteTimings,
             _scheduling_context: &SchedulingContext,
             _task: &Task,
-            _handler_context: &HandlerContext,
+            _handler_context: &mut HandlerContext,
         ) {
             *result = Err(TransactionError::AccountNotFound);
         }
@@ -2462,7 +2503,7 @@ mod tests {
                 _timings: &mut ExecuteTimings,
                 _scheduling_context: &SchedulingContext,
                 task: &Task,
-                _handler_context: &HandlerContext,
+                _handler_context: &mut HandlerContext,
             ) {
                 assert_eq!(task.task_id(), 0);
                 *result = Err(TransactionError::CommitCancelled);
@@ -2608,7 +2649,7 @@ mod tests {
                 _timings: &mut ExecuteTimings,
                 _scheduling_context: &SchedulingContext,
                 _task: &Task,
-                _handler_context: &HandlerContext,
+                _handler_context: &mut HandlerContext,
             ) {
                 *TASK_COUNT.lock().unwrap() += 1;
             }
@@ -2931,7 +2972,7 @@ mod tests {
                 _timings: &mut ExecuteTimings,
                 _scheduling_context: &SchedulingContext,
                 task: &Task,
-                _handler_context: &HandlerContext,
+                _handler_context: &mut HandlerContext,
             ) {
                 let task_id = task.task_id();
                 if task_id == 0 {
@@ -3010,7 +3051,7 @@ mod tests {
                 _timings: &mut ExecuteTimings,
                 _scheduling_context: &SchedulingContext,
                 task: &Task,
-                _handler_context: &HandlerContext,
+                _handler_context: &mut HandlerContext,
             ) {
                 let task_id = task.task_id();
                 *TASK_COUNT.lock().unwrap() += 1;
@@ -3094,7 +3135,7 @@ mod tests {
                 timings: &mut ExecuteTimings,
                 scheduling_context: &SchedulingContext,
                 task: &Task,
-                handler_context: &HandlerContext,
+                handler_context: &mut HandlerContext,
             ) {
                 let task_id = task.task_id();
                 match task_id {
@@ -3201,7 +3242,7 @@ mod tests {
                 _timings: &mut ExecuteTimings,
                 scheduling_context: &SchedulingContext,
                 task: &Task,
-                _handler_context: &HandlerContext,
+                _handler_context: &mut HandlerContext,
             ) {
                 // The task task_id must always be matched to the slot.
                 assert_eq!(task.task_id() as Slot, scheduling_context.slot());
@@ -3315,7 +3356,7 @@ mod tests {
                     &mut timings,
                     &context,
                     &task,
-                    &pool.create_handler_context(),
+                    &mut pool.common_handler_context.clone().into_handler_context(),
                 );
                 (result, timings)
             }));
