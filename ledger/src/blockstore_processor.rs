@@ -1068,7 +1068,7 @@ impl PohVerificationJob {
                 let _ = publisher.publish(&EntryEvent::PohVerified {
                     timestamp_ns: monotonic_timestamp_ns(),
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                     entry_index: (starting_entry_index + index).try_into().unwrap(),
                 });
             }
@@ -1114,7 +1114,7 @@ impl SignaturesVerificationJob {
                 let _ = publisher.publish(&TransactionEvent::SignaturesVerified {
                     timestamp_ns: monotonic_timestamp_ns(),
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                     transaction_index: (starting_transaction_index + index).try_into().unwrap(),
                 });
             }
@@ -1624,7 +1624,7 @@ fn confirm_slot_entries(
                     let _ = publisher.publish(&EntryEvent::Begin {
                         timestamp_ns,
                         slot,
-                        bank_id: bank_id.into(),
+                        bank_id,
                         entry_index: entry_index.try_into().unwrap(),
                         starting_transaction_index: entry_tx_starting_index.try_into().unwrap(),
                         num_transactions: num_txs.try_into().unwrap(),
@@ -1635,7 +1635,7 @@ fn confirm_slot_entries(
                         let _ = publisher.publish(&TransactionEvent::Begin {
                             timestamp_ns,
                             slot,
-                            bank_id: bank_id.into(),
+                            bank_id,
                             transaction_index: (entry_tx_starting_index + index)
                                 .try_into()
                                 .unwrap(),
@@ -1645,19 +1645,19 @@ fn confirm_slot_entries(
                     }
                 }
             }
-            if let Some(entry_notification_sender) = entry_notification_sender {
-                if let Err(err) = entry_notification_sender.send(EntryNotification::Entry {
+            if let Some(entry_notification_sender) = entry_notification_sender
+                && let Err(err) = entry_notification_sender.send(EntryNotification::Entry {
                     slot,
                     bank_id,
                     index: entry_index,
                     entry: entry.into(),
                     starting_transaction_index: entry_tx_starting_index,
-                }) {
-                    warn!(
-                        "Slot {slot}, entry {entry_index} entry_notification_sender send failed: \
-                         {err:?}"
-                    );
-                }
+                })
+            {
+                warn!(
+                    "Slot {slot}, entry {entry_index} entry_notification_sender send failed: \
+                     {err:?}"
+                );
             }
             let next_tx_starting_index = entry_tx_starting_index.saturating_add(num_txs);
             entry_tx_starting_indexes.push(entry_tx_starting_index);
@@ -2646,8 +2646,18 @@ pub mod tests {
     };
     #[cfg(target_os = "linux")]
     use {
-        agave_event_system::{EventSystem, StreamConfig, subscriber::StreamExplorer},
-        solana_runtime::replay_events::{ENTRY_EVENT_STREAM, TRANSACTION_EVENT_STREAM},
+        agave_event_system::{
+            EventSystem, StreamConfig, monotonic_timestamp_ns, subscriber::StreamExplorer,
+        },
+        solana_cost_model::cost_tracker::CostTrackerLimits,
+        solana_runtime::replay_events::{
+            ENTRY_EVENT_STREAM, TRANSACTION_EVENT_STREAM, TransactionEventFactories,
+            execution::{
+                ExecutionFailureStage, INSTRUCTION_EXECUTION_STREAM, InstructionExecutionEvent,
+                TRANSACTION_EXECUTION_STREAM, TransactionExecutionEvent, TransactionProcessingKind,
+            },
+        },
+        solana_system_interface::program as system_program,
         tempfile::TempDir,
     };
 
@@ -5229,16 +5239,24 @@ pub mod tests {
         event_system.set_stream_policy("replay.".parse().unwrap());
         let config = StreamConfig {
             capacity: 32,
-            publisher_slots: 3,
+            publisher_slots: 4,
             subscriber_slots: 1,
         };
         let factories = ReplayEventFactories {
             entries: event_system
                 .create_stream(ENTRY_EVENT_STREAM, config)
                 .unwrap(),
-            transactions: event_system
-                .create_stream(TRANSACTION_EVENT_STREAM, config)
-                .unwrap(),
+            transactions: TransactionEventFactories {
+                lifecycle: event_system
+                    .create_stream(TRANSACTION_EVENT_STREAM, config)
+                    .unwrap(),
+                execution: event_system
+                    .create_stream(TRANSACTION_EXECUTION_STREAM, config)
+                    .unwrap(),
+                instructions: event_system
+                    .create_stream(INSTRUCTION_EXECUTION_STREAM, config)
+                    .unwrap(),
+            },
         };
         let explorer = StreamExplorer::new(events_path);
         let mut entry_subscriber = explorer
@@ -5254,6 +5272,18 @@ pub mod tests {
             .try_connect_typed::<TransactionEvent>()
             .unwrap();
         let mut publishers = factories.create_publishers();
+        let mut execution_subscriber = explorer
+            .available_streams()
+            .find(|stream| stream.stream_name() == &TRANSACTION_EXECUTION_STREAM)
+            .unwrap()
+            .try_connect_typed::<TransactionExecutionEvent>()
+            .unwrap();
+        let mut instruction_subscriber = explorer
+            .available_streams()
+            .find(|stream| stream.stream_name() == &INSTRUCTION_EXECUTION_STREAM)
+            .unwrap()
+            .try_connect_typed::<InstructionExecutionEvent>()
+            .unwrap();
         let workers = ReplayVerificationWorkerPool::new(1, Some(factories.clone()));
         let pool = DefaultSchedulerPool::new(
             Some(1),
@@ -5271,16 +5301,33 @@ pub mod tests {
         let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         let mut progress = ConfirmationProgress::new(bank.last_blockhash());
 
-        for transaction_index in 0..2 {
+        for transaction_index in 0..5 {
+            let successful = transaction_index < 2;
+            let rejected = transaction_index == 3;
+            let replay_failed = transaction_index == 4;
+            if replay_failed {
+                bank.write_cost_tracker()
+                    .unwrap()
+                    .set_limits(CostTrackerLimits::new(u64::MAX, 1, u64::MAX));
+            }
             let transaction = system_transaction::transfer(
                 &mint_keypair,
                 &Pubkey::new_unique(),
-                genesis_config.rent.minimum_balance(0),
-                bank.last_blockhash(),
+                if transaction_index == 2 {
+                    u64::MAX
+                } else {
+                    genesis_config.rent.minimum_balance(0)
+                },
+                if rejected {
+                    Hash::default()
+                } else {
+                    bank.last_blockhash()
+                },
             );
             let signature = *transaction.signatures[0].as_array();
             let entry = next_entry(&progress.last_entry, 1, vec![transaction]);
             let bank = take_bank_with_scheduler_for_tests(&pool, bank.clone());
+            let before_ns = monotonic_timestamp_ns();
             confirm_slot_entries(
                 &bank,
                 &workers,
@@ -5294,10 +5341,20 @@ pub mod tests {
                 &mut publishers,
             )
             .unwrap();
-            bank.wait_for_completed_scheduler().unwrap().0.unwrap();
+            assert_eq!(
+                bank.wait_for_completed_scheduler().unwrap().0,
+                if rejected {
+                    Err(TransactionError::BlockhashNotFound)
+                } else if replay_failed {
+                    Err(TransactionError::WouldExceedMaxBlockCostLimit)
+                } else {
+                    Ok(())
+                }
+            );
             progress
                 .wait_for_all_verification_results(&mut 0, &mut 0)
                 .unwrap();
+            let after_ns = monotonic_timestamp_ns();
 
             let mut transaction_events = HashSet::new();
             for _ in 0..4 {
@@ -5337,8 +5394,114 @@ pub mod tests {
                 };
                 assert_eq!(
                     (slot, bank_id, index),
-                    (bank.slot(), bank.bank_id().into(), transaction_index)
+                    (bank.slot(), bank.bank_id(), transaction_index)
                 );
+            }
+
+            let event = execution_subscriber.try_recv().unwrap().decode().unwrap();
+            match &event {
+                TransactionExecutionEvent::Executed { .. } => assert!(successful),
+                TransactionExecutionEvent::Failed {
+                    stage,
+                    error_variant,
+                    error_code,
+                    ..
+                } => {
+                    assert!(!successful);
+                    assert_eq!(
+                        (*stage, *error_variant, *error_code),
+                        if rejected {
+                            (ExecutionFailureStage::BeforeExecution, 7, 0)
+                        } else if replay_failed {
+                            (ExecutionFailureStage::ReplayCheck, 17, 0)
+                        } else {
+                            (ExecutionFailureStage::InstructionExecution, 8, 1)
+                        }
+                    );
+                }
+            }
+            let (TransactionExecutionEvent::Executed {
+                timestamp_ns,
+                slot,
+                bank_id,
+                transaction_index: index,
+                kind,
+                executed_units,
+                charged_units,
+            }
+            | TransactionExecutionEvent::Failed {
+                timestamp_ns,
+                slot,
+                bank_id,
+                transaction_index: index,
+                kind,
+                executed_units,
+                charged_units,
+                ..
+            }) = event;
+            assert_eq!(
+                (slot, bank_id, index),
+                (bank.slot(), bank.bank_id(), transaction_index)
+            );
+            assert!(before_ns <= timestamp_ns && timestamp_ns <= after_ns);
+            assert_eq!(
+                kind,
+                if rejected {
+                    TransactionProcessingKind::Rejected
+                } else {
+                    TransactionProcessingKind::Executed
+                }
+            );
+            assert_eq!(executed_units > 0, !rejected);
+            assert_eq!(executed_units, charged_units);
+            if !rejected {
+                let event = instruction_subscriber.try_recv().unwrap().decode().unwrap();
+                match &event {
+                    InstructionExecutionEvent::Executed { .. } => assert_ne!(transaction_index, 2),
+                    InstructionExecutionEvent::Failed {
+                        error_variant,
+                        error_code,
+                        ..
+                    } => {
+                        assert_eq!(transaction_index, 2);
+                        assert_eq!((*error_variant, *error_code), (25, 1));
+                    }
+                }
+                let (InstructionExecutionEvent::Executed {
+                    start_ns,
+                    end_ns,
+                    slot,
+                    bank_id,
+                    transaction_index: index,
+                    instruction_index,
+                    caller_index,
+                    program_id,
+                    stack_height,
+                    executed_units: units,
+                }
+                | InstructionExecutionEvent::Failed {
+                    start_ns,
+                    end_ns,
+                    slot,
+                    bank_id,
+                    transaction_index: index,
+                    instruction_index,
+                    caller_index,
+                    program_id,
+                    stack_height,
+                    executed_units: units,
+                    ..
+                }) = event;
+                assert_eq!(
+                    (slot, bank_id, index),
+                    (bank.slot(), bank.bank_id(), transaction_index)
+                );
+                assert_eq!(instruction_index, 0);
+                assert_eq!(caller_index, u16::MAX);
+                assert_eq!(program_id, system_program::id().to_bytes());
+                assert_eq!(stack_height, 1);
+                assert_eq!(units, executed_units);
+                assert!(before_ns <= start_ns && start_ns <= end_ns && end_ns <= after_ns);
             }
 
             let mut entry_events = HashSet::new();
@@ -5367,12 +5530,14 @@ pub mod tests {
                 };
                 assert_eq!(
                     (slot, bank_id, index),
-                    (bank.slot(), bank.bank_id().into(), transaction_index)
+                    (bank.slot(), bank.bank_id(), transaction_index)
                 );
             }
         }
         assert!(entry_subscriber.try_recv().is_err());
         assert!(transaction_subscriber.try_recv().is_err());
+        assert!(execution_subscriber.try_recv().is_err());
+        assert!(instruction_subscriber.try_recv().is_err());
     }
 
     #[test]

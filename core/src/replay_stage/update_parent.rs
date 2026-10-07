@@ -1,17 +1,17 @@
 //! Fast-leader-handover replay helpers.
 
 use {
-    super::{
-        ProcessActiveBanksContext, ReplayStage, TowerBFTStructures,
-        dead_slots::{
-            DeadSlotLogLevel, DeadSlotNotifications, mark_hard_dead_slot,
-            mark_hard_dead_slot_notifications, send_invalid_bank,
-        },
-        events::SlotEvent,
-    },
     crate::{
         consensus::progress_map::{DeadSlotReason, ProgressMap},
         repair::cluster_slot_state_verifier::{DuplicateSlotsToRepair, PurgeRepairSlotCounter},
+        replay_stage::{
+            ProcessActiveBanksContext, ReplayStage, TowerBFTStructures,
+            dead_slots::{
+                DeadSlotLogLevel, DeadSlotNotifications, mark_hard_dead_slot,
+                mark_hard_dead_slot_notifications, send_invalid_bank,
+            },
+            events::SlotEvent,
+        },
     },
     agave_event_system::publisher::Publisher,
     agave_votor_messages::migration::MigrationStatus,

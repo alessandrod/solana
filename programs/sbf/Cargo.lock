@@ -5339,7 +5339,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5859,7 +5859,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7397,6 +7397,7 @@ dependencies = [
 name = "solana-ledger"
 version = "4.3.1"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -7914,6 +7915,7 @@ dependencies = [
  "bincode",
  "cfg-if 1.0.4",
  "itertools 0.14.0",
+ "libc",
  "log",
  "qualifier_attr",
  "rand 0.9.4",
@@ -8319,6 +8321,7 @@ name = "solana-runtime"
 version = "4.3.1"
 dependencies = [
  "agave-bls-cert-verify",
+ "agave-event-system",
  "agave-feature-set",
  "agave-fs",
  "agave-precompiles",
@@ -10186,6 +10189,7 @@ name = "solana-unified-scheduler-pool"
 version = "4.3.1"
 dependencies = [
  "agave-banking-stage-ingress-types",
+ "agave-event-system",
  "assert_matches",
  "crossbeam-channel",
  "dashmap",
@@ -10827,7 +10831,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

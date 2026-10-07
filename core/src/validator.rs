@@ -136,7 +136,11 @@ use {
         prioritization_fee_cache::PrioritizationFeeCache,
         replay_events::{
             ENTRY_EVENT_STREAM, EntryEvent, ReplayEventFactories, TRANSACTION_EVENT_STREAM,
-            TransactionEvent,
+            TransactionEvent, TransactionEventFactories,
+            execution::{
+                INSTRUCTION_EXECUTION_STREAM, InstructionExecutionEvent,
+                TRANSACTION_EXECUTION_STREAM, TransactionExecutionEvent,
+            },
         },
         runtime_config::RuntimeConfig,
         snapshot_bank_utils,
@@ -993,13 +997,38 @@ impl Validator {
                         "Failed to create replay entry-event stream: {err}"
                     ))
                 })?,
-            transactions: event_system
-                .create_stream::<TransactionEvent>(TRANSACTION_EVENT_STREAM, replay_stream_config)
-                .map_err(|err| {
-                    ValidatorError::Other(format!(
-                        "Failed to create replay transaction-event stream: {err}"
-                    ))
-                })?,
+            transactions: TransactionEventFactories {
+                lifecycle: event_system
+                    .create_stream::<TransactionEvent>(
+                        TRANSACTION_EVENT_STREAM,
+                        replay_stream_config,
+                    )
+                    .map_err(|err| {
+                        ValidatorError::Other(format!(
+                            "Failed to create replay transaction-event stream: {err}"
+                        ))
+                    })?,
+                execution: event_system
+                    .create_stream::<TransactionExecutionEvent>(
+                        TRANSACTION_EXECUTION_STREAM,
+                        replay_stream_config,
+                    )
+                    .map_err(|err| {
+                        ValidatorError::Other(format!(
+                            "Failed to create replay transaction-execution stream: {err}"
+                        ))
+                    })?,
+                instructions: event_system
+                    .create_stream::<InstructionExecutionEvent>(
+                        INSTRUCTION_EXECUTION_STREAM,
+                        replay_stream_config,
+                    )
+                    .map_err(|err| {
+                        ValidatorError::Other(format!(
+                            "Failed to create replay instruction-execution stream: {err}"
+                        ))
+                    })?,
+            },
         };
         blockstore_process_options.replay_event_factories = Some(replay_event_factories.clone());
 

@@ -159,6 +159,7 @@ impl SvmTestEnvironment<'_> {
                 enable_return_data_recording: true,
                 enable_cpi_recording: false,
                 enable_transaction_balance_recording: false,
+                instruction_callback: None,
             },
             drop_on_failure: test_entry.drop_on_failure,
             all_or_nothing: test_entry.all_or_nothing,
@@ -189,7 +190,7 @@ impl SvmTestEnvironment<'_> {
         }
     }
 
-    pub fn execute(&self) -> LoadAndExecuteSanitizedTransactionsOutput {
+    pub fn execute(&mut self) -> LoadAndExecuteSanitizedTransactionsOutput {
         let (transactions, check_results) = self.test_entry.prepare_transactions();
         let batch_output = self
             .batch_processor
@@ -198,7 +199,7 @@ impl SvmTestEnvironment<'_> {
                 &transactions,
                 check_results,
                 &self.processing_environment,
-                &self.processing_config,
+                &mut self.processing_config,
             );
 
         // build a hashmap of final account states incrementally
@@ -1094,7 +1095,7 @@ fn simple_transfer(
         );
     }
 
-    let env = SvmTestEnvironment::create(test_entry);
+    let mut env = SvmTestEnvironment::create(test_entry);
     env.execute();
 }
 
@@ -2773,8 +2774,41 @@ fn drop_on_failure_batch(statuses: &[bool]) -> Vec<SvmTestEntry> {
 #[test_case(drop_on_failure_batch(&[true, false, true]))]
 fn svm_integration(test_entries: Vec<SvmTestEntry>) {
     for test_entry in test_entries {
-        let env = SvmTestEnvironment::create(test_entry);
-        env.execute();
+        let mut instructions = vec![Vec::new(); test_entry.transaction_batch.len()];
+        let mut on_instruction = |index: usize, instruction| {
+            instructions[index].push(instruction);
+        };
+        let mut env = SvmTestEnvironment::create(test_entry);
+        env.processing_config.recording_config.instruction_callback = Some(&mut on_instruction);
+        let output = env.execute();
+        drop(env);
+        for (result, instructions) in output.processing_results.into_iter().zip(instructions) {
+            let Ok(ProcessedTransaction::Executed(transaction)) = result else {
+                continue;
+            };
+            let details = &transaction.execution_details;
+            let top_level_units = instructions
+                .iter()
+                .filter(|instruction| instruction.caller_index.is_none())
+                .map(|instruction| instruction.executed_units)
+                .sum::<u64>();
+            assert_eq!(top_level_units, details.executed_units);
+            for (index, instruction) in instructions.iter().enumerate() {
+                assert!(instruction.start_ns <= instruction.end_ns);
+                if let Some(caller_index) = instruction.caller_index {
+                    let caller = instructions[index + 1..]
+                        .iter()
+                        .find(|caller| caller.instruction_index == caller_index)
+                        .unwrap();
+                    assert_eq!(instruction.stack_height, caller.stack_height + 1);
+                    assert!(instruction.executed_units <= caller.executed_units);
+                    assert!(caller.start_ns <= instruction.start_ns);
+                    assert!(instruction.end_ns <= caller.end_ns);
+                } else {
+                    assert_eq!(instruction.stack_height, 1);
+                }
+            }
+        }
     }
 }
 
@@ -3456,7 +3490,7 @@ fn svm_inspect_nonce_load_failure(fee_paying_nonce: bool) {
         .data_as_mut_slice()
         .copy_from_slice(advanced_nonce_info.account().data());
 
-    let env = SvmTestEnvironment::create(test_entry.clone());
+    let mut env = SvmTestEnvironment::create(test_entry.clone());
     env.execute();
 
     let actual_inspected_accounts = env.mock_bank.inspected_accounts.read().unwrap().clone();
@@ -3721,7 +3755,7 @@ fn fee_only_loaded_transaction_data_size(define_ltds_fee_only_semantics: bool) {
 
         test_entry.decrease_expected_lamports(&fee_payer, LAMPORTS_PER_SIGNATURE * 3);
 
-        let env = SvmTestEnvironment::create(test_entry);
+        let mut env = SvmTestEnvironment::create(test_entry);
         let output = env.execute();
 
         let success_loaded_size = output.processing_results[0]
@@ -3773,7 +3807,7 @@ fn fee_only_loaded_transaction_data_size(define_ltds_fee_only_semantics: bool) {
 #[test]
 fn svm_metrics_accumulation() {
     for test_entry in program_medley(false) {
-        let env = SvmTestEnvironment::create(test_entry);
+        let mut env = SvmTestEnvironment::create(test_entry);
 
         let (transactions, check_results) = env.test_entry.prepare_transactions();
 
@@ -3782,7 +3816,7 @@ fn svm_metrics_accumulation() {
             &transactions,
             check_results,
             &env.processing_environment,
-            &env.processing_config,
+            &mut env.processing_config,
         );
 
         // jit compilation only happens on non-windows && x86_64

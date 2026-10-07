@@ -281,18 +281,19 @@ fn svm_concurrent() {
                     )) as TransactionCheckResult
                 })
                 .collect();
-            let processing_config = TransactionProcessingConfig {
-                recording_config: ExecutionRecordingConfig {
-                    enable_log_recording: true,
-                    enable_return_data_recording: false,
-                    enable_cpi_recording: false,
-                    enable_transaction_balance_recording: false,
-                },
-                ..Default::default()
-            };
             let check_tx_data = std::mem::take(&mut check_data[idx]);
 
             thread::spawn(move || {
+                let mut processing_config = TransactionProcessingConfig {
+                    recording_config: ExecutionRecordingConfig {
+                        enable_log_recording: true,
+                        enable_return_data_recording: false,
+                        enable_cpi_recording: false,
+                        enable_transaction_balance_recording: false,
+                        instruction_callback: None,
+                    },
+                    ..Default::default()
+                };
                 let result = local_batch.load_and_execute_sanitized_transactions(
                     &*local_bank,
                     &th_txs,
@@ -304,7 +305,7 @@ fn svm_concurrent() {
                         ),
                         ..get_mock_transaction_processing_environment()
                     },
-                    &processing_config,
+                    &mut processing_config,
                 );
 
                 for (idx, processing_result) in result.processing_results.iter().enumerate() {
