@@ -50,12 +50,12 @@ use {
         bank_forks::BankForks,
         block_component_processor::BlockComponentProcessorError,
         commitment::VOTE_THRESHOLD_SIZE,
-        installed_scheduler_pool::BankWithScheduler,
-        leader_schedule_utils::leader_slot_index,
-        replay_events::{
+        events::replay::{
             EntryEvent, ReplayEventFactories, ReplayEventPublishers, TransactionEvent,
             VerificationOutcome,
         },
+        installed_scheduler_pool::BankWithScheduler,
+        leader_schedule_utils::leader_slot_index,
         runtime_config::RuntimeConfig,
         snapshot_controller::SnapshotController,
         transaction_execution::TransactionStatusSender,
@@ -1690,7 +1690,6 @@ fn confirm_slot_entries(
                         slot,
                         bank_id: bank_id.into(),
                         entry_index: entry_index.try_into().unwrap(),
-                        starting_transaction_index: entry_tx_starting_index.try_into().unwrap(),
                         num_transactions: num_txs.try_into().unwrap(),
                     });
                 }
