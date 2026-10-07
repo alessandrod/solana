@@ -97,9 +97,9 @@ use {
         bank_forks_controller::{BankForksCommand, BankForksCommandReceiver, SetRootCommand},
         block_component_processor::BlockComponentProcessorError,
         commitment::BlockCommitmentCache,
+        events::replay::{ReplayEventFactories, ReplayEventPublishers},
         installed_scheduler_pool::BankWithScheduler,
         leader_schedule_utils::first_of_consecutive_leader_slots,
-        replay_events::{ReplayEventFactories, ReplayEventPublishers},
         snapshot_controller::SnapshotController,
         transaction_execution::{
             TransactionHistoryPurgeInput, TransactionHistoryPurgeSource, TransactionStatusSender,

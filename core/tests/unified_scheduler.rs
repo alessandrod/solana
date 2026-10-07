@@ -50,7 +50,7 @@ fn test_scheduler_waited_by_drop_bank_service() {
             timings: &mut ExecuteTimings,
             scheduling_context: &SchedulingContext,
             task: &Task,
-            handler_context: &HandlerContext,
+            handler_context: &mut HandlerContext,
         ) -> Result<TrackedCost> {
             info!("Stalling at StallingHandler::handle()...");
             *LOCK_TO_STALL.lock().unwrap();

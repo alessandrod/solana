@@ -9697,6 +9697,7 @@ dependencies = [
  "assert_matches",
  "base64 0.23.1",
  "itertools 0.15.0",
+ "libc",
  "libsecp256k1",
  "log",
  "openssl",
@@ -10892,6 +10893,7 @@ dependencies = [
 name = "solana-svm"
 version = "4.5.0-alpha.2"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-precompiles",
  "ahash 0.8.12",
