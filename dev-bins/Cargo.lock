@@ -7135,6 +7135,7 @@ dependencies = [
 name = "solana-ledger"
 version = "4.5.0-alpha.2"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-reserved-account-keys",
  "agave-snapshots",
@@ -7585,6 +7586,7 @@ version = "4.5.0-alpha.2"
 dependencies = [
  "base64 0.23.1",
  "itertools 0.15.0",
+ "libc",
  "log",
  "qualifier_attr",
  "rand 0.9.4",
@@ -7931,6 +7933,7 @@ name = "solana-runtime"
 version = "4.5.0-alpha.2"
 dependencies = [
  "agave-bls-cert-verify",
+ "agave-event-system",
  "agave-feature-set",
  "agave-fs",
  "agave-precompiles",
@@ -9049,6 +9052,7 @@ name = "solana-unified-scheduler-pool"
 version = "4.5.0-alpha.2"
 dependencies = [
  "agave-banking-stage-ingress-types",
+ "agave-event-system",
  "agave-jemalloc",
  "assert_matches",
  "crossbeam-channel",

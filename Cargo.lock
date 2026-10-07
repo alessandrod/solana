@@ -9629,6 +9629,7 @@ dependencies = [
  "assert_matches",
  "base64 0.23.1",
  "itertools 0.15.0",
+ "libc",
  "libsecp256k1",
  "log",
  "openssl",

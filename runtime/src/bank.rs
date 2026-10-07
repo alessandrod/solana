@@ -4057,6 +4057,7 @@ impl Bank {
                     enable_log_recording: true,
                     enable_return_data_recording: true,
                     enable_transaction_balance_recording: true,
+                    instruction_callback: None,
                 },
                 drop_on_failure: false,
                 all_or_nothing: false,
@@ -4262,7 +4263,7 @@ impl Bank {
         max_age: usize,
         timings: &mut ExecuteTimings,
         error_counters: &mut TransactionErrorMetrics,
-        processing_config: TransactionProcessingConfig,
+        mut processing_config: TransactionProcessingConfig,
     ) -> LoadAndExecuteTransactionsOutput {
         let sanitized_txs = batch.sanitized_transactions();
 
@@ -4307,7 +4308,7 @@ impl Bank {
                 sanitized_txs,
                 check_results,
                 &processing_environment,
-                &processing_config,
+                &mut processing_config,
             );
 
         // Accumulate the errors returned by the batch processor.
@@ -4879,6 +4880,7 @@ impl Bank {
                 enable_log_recording: true,
                 enable_return_data_recording: true,
                 enable_transaction_balance_recording: false,
+                instruction_callback: None,
             },
             &mut ExecuteTimings::default(),
             Some(1000 * 1000),
