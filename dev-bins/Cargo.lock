@@ -7653,6 +7653,7 @@ version = "4.5.0-alpha.4"
 dependencies = [
  "base64 0.23.1",
  "itertools 0.15.0",
+ "libc",
  "log",
  "qualifier_attr",
  "rand 0.9.4",
@@ -8584,6 +8585,7 @@ dependencies = [
 name = "solana-svm"
 version = "4.5.0-alpha.4"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-precompiles",
  "ahash 0.8.12",

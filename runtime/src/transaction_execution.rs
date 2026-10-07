@@ -16,9 +16,11 @@ use {
         transaction_cost::{TrackedCost, TransactionCost},
     },
     solana_measure::measure::Measure,
+    solana_program_runtime::invoke_context::InstructionExecutionDetails,
     solana_runtime_transaction::transaction_with_meta::{TransactionWithMeta, writable_accounts},
     solana_signature::Signature,
     solana_svm::{
+        events::TransactionProcessingDetails,
         transaction_commit_result::{
             TransactionCommitResult, TransactionCommitResultExtensions as _,
         },
@@ -100,6 +102,13 @@ pub struct TransactionBatchWithIndexes<'a, 'b, Tx: SVMMessage> {
     pub transaction_indexes: Vec<usize>,
 }
 
+/// Synchronous callbacks for instruction completion and pre-commit SVM processing results.
+#[derive(Default)]
+pub struct ExecutionCallbacks<'a> {
+    pub instructions: Option<&'a mut dyn FnMut(usize, InstructionExecutionDetails)>,
+    pub transactions: Option<&'a mut dyn FnMut(usize, TransactionProcessingDetails)>,
+}
+
 pub fn execute_batch<'a>(
     batch: &'a TransactionBatchWithIndexes<impl TransactionWithMeta>,
     bank: &'a Arc<Bank>,
@@ -109,6 +118,7 @@ pub fn execute_batch<'a>(
     timings: &'a mut ExecuteTimings,
     log_messages_bytes_limit: Option<usize>,
     prioritization_fee_cache: Option<&'a PrioritizationFeeCache>,
+    callbacks: ExecutionCallbacks<'_>,
 ) -> TransactionResult<Vec<TransactionCost>> {
     let TransactionBatchWithIndexes {
         batch,
@@ -116,17 +126,31 @@ pub fn execute_batch<'a>(
     } = batch;
 
     let transaction_indexes = Cow::from(transaction_indexes);
+    let ExecutionCallbacks {
+        instructions,
+        mut transactions,
+    } = callbacks;
+    let recording_config = ExecutionRecordingConfig {
+        instruction_callback: instructions,
+        ..ExecutionRecordingConfig::new_single_setting(transaction_status_sender.is_some())
+    };
 
     let pre_commit_callback = |processing_results: &_| -> TransactionResult<()> {
         // We're entering into one of the block-verification methods.
-        get_first_error(batch, processing_results)
+        let result = get_first_error(batch, processing_results);
+        if let Some(callback) = transactions.as_mut() {
+            for (index, result) in processing_results.iter().enumerate() {
+                callback(index, result.into());
+            }
+        }
+        result
     };
 
     let (commit_results, balance_collector) = batch
         .bank()
         .load_execute_and_commit_transactions_with_pre_commit_callback(
             batch,
-            ExecutionRecordingConfig::new_single_setting(transaction_status_sender.is_some()),
+            recording_config,
             timings,
             log_messages_bytes_limit,
             pre_commit_callback,
@@ -540,6 +564,7 @@ mod tests {
             &mut timing,
             None,
             None,
+            ExecutionCallbacks::default(),
         );
 
         if expected_tx_result.is_ok() {
