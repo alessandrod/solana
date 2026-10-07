@@ -40,7 +40,7 @@ use {
         execution_budget::{
             SVMTransactionExecutionAndFeeBudgetLimits, SVMTransactionExecutionCost,
         },
-        invoke_context::{EnvironmentConfig, InvokeContext},
+        invoke_context::{EnvironmentConfig, InstructionExecutionDetails, InvokeContext},
         loaded_programs::{
             EpochBoundaryPreparation, ForkGraph, Percent, ProgramCache, ProgramCacheForTxBatch,
             ProgramRuntimeEnvironment, ProgramRuntimeEnvironments, ProgramToLoad,
@@ -96,21 +96,24 @@ pub struct LoadAndExecuteSanitizedTransactionsOutput {
 }
 
 /// Configuration of the recording capabilities for transaction execution
-#[derive(Copy, Clone, Default)]
-pub struct ExecutionRecordingConfig {
+#[derive(Default)]
+pub struct ExecutionRecordingConfig<'a> {
     pub enable_cpi_recording: bool,
     pub enable_log_recording: bool,
     pub enable_return_data_recording: bool,
     pub enable_transaction_balance_recording: bool,
+    /// Reports completed invocations synchronously, with the transaction's batch position.
+    pub instruction_callback: Option<&'a mut dyn FnMut(usize, InstructionExecutionDetails)>,
 }
 
-impl ExecutionRecordingConfig {
+impl ExecutionRecordingConfig<'_> {
     pub fn new_single_setting(option: bool) -> Self {
         ExecutionRecordingConfig {
             enable_return_data_recording: option,
             enable_log_recording: option,
             enable_cpi_recording: option,
             enable_transaction_balance_recording: option,
+            instruction_callback: None,
         }
     }
 }
@@ -127,7 +130,7 @@ pub struct TransactionProcessingConfig<'a> {
     /// batch.
     pub limit_to_load_programs: bool,
     /// Recording capabilities for transaction execution.
-    pub recording_config: ExecutionRecordingConfig,
+    pub recording_config: ExecutionRecordingConfig<'a>,
     /// Should failing transactions within the batch be dropped (no fee charged
     /// & not committed).
     pub drop_on_failure: bool,
@@ -459,7 +462,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         sanitized_txs: &[impl SVMTransaction],
         check_results: Vec<TransactionCheckResult>,
         environment: &TransactionProcessingEnvironment,
-        config: &TransactionProcessingConfig,
+        config: &mut TransactionProcessingConfig,
     ) -> LoadAndExecuteSanitizedTransactionsOutput {
         // If `check_results` does not have the same length as `sanitized_txs`,
         // transactions could be truncated as a result of `.iter().zip()` in
@@ -520,7 +523,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // Transactions must be executed in order, because transactions
         // in the same batch may modify the same accounts. Transaction order is
         // preserved within entries written to the ledger.
-        for (tx, check_result) in sanitized_txs.iter().zip(check_results) {
+        for (transaction_index, (tx, check_result)) in
+            sanitized_txs.iter().zip(check_results).enumerate()
+        {
             let (validate_result, validate_fees_us) = measure_us!(match check_result {
                 Ok(tx_details) => Self::validate_transaction_nonce_and_fee_payer(
                     &mut account_loader,
@@ -627,6 +632,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     let executed_tx = self.execute_loaded_transaction(
                         callbacks,
                         tx,
+                        transaction_index,
                         &sysvar_cache,
                         loaded_transaction,
                         &mut execute_timings,
@@ -1098,13 +1104,14 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         &self,
         callback: &CB,
         tx: &impl SVMTransaction,
+        transaction_index: usize,
         sysvar_cache: &SysvarCache,
         mut loaded_transaction: LoadedTransaction,
         execute_timings: &mut ExecuteTimings,
         error_metrics: &mut TransactionErrorMetrics,
         program_cache_for_tx_batch: &mut ProgramCacheForTxBatch,
         environment: &TransactionProcessingEnvironment,
-        config: &TransactionProcessingConfig,
+        config: &mut TransactionProcessingConfig,
     ) -> ExecutedTransaction {
         let transaction_accounts = std::mem::take(&mut loaded_transaction.accounts);
 
@@ -1162,6 +1169,11 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         let mut executed_units = 0u64;
 
+        let mut forward_instruction = config
+            .recording_config
+            .instruction_callback
+            .as_deref_mut()
+            .map(|callback| move |instruction| callback(transaction_index, instruction));
         let mut invoke_context = InvokeContext::new(
             &mut transaction_context,
             program_cache_for_tx_batch,
@@ -1178,6 +1190,10 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             compute_budget,
             self.execution_cost,
         );
+
+        if let Some(callback) = forward_instruction.as_mut() {
+            invoke_context.set_instruction_callback(Some(callback));
+        }
 
         let mut process_message_time = Measure::start("process_message_time");
         let process_result = invoke_context
@@ -1668,7 +1684,7 @@ mod tests {
             &sanitized_txs,
             check_results,
             &get_mock_transaction_processing_environment(),
-            &TransactionProcessingConfig::default(),
+            &mut TransactionProcessingConfig::default(),
         );
     }
 
@@ -1854,13 +1870,14 @@ mod tests {
         let executed_tx = batch_processor.execute_loaded_transaction(
             &mock_bank,
             &sanitized_transaction,
+            0,
             &sysvar_cache,
             loaded_transaction.clone(),
             &mut ExecuteTimings::default(),
             &mut TransactionErrorMetrics::default(),
             &mut program_cache_for_tx_batch,
             &processing_environment,
-            &processing_config,
+            &mut processing_config,
         );
         assert!(executed_tx.execution_details.log_messages.is_some());
 
@@ -1869,13 +1886,14 @@ mod tests {
         let executed_tx = batch_processor.execute_loaded_transaction(
             &mock_bank,
             &sanitized_transaction,
+            0,
             &sysvar_cache,
             loaded_transaction.clone(),
             &mut ExecuteTimings::default(),
             &mut TransactionErrorMetrics::default(),
             &mut program_cache_for_tx_batch,
             &processing_environment,
-            &processing_config,
+            &mut processing_config,
         );
         assert!(executed_tx.execution_details.log_messages.is_some());
         assert!(executed_tx.execution_details.inner_instructions.is_none());
@@ -1887,13 +1905,14 @@ mod tests {
         let executed_tx = batch_processor.execute_loaded_transaction(
             &mock_bank,
             &sanitized_transaction,
+            0,
             &sysvar_cache,
             loaded_transaction,
             &mut ExecuteTimings::default(),
             &mut TransactionErrorMetrics::default(),
             &mut program_cache_for_tx_batch,
             &processing_environment,
-            &processing_config,
+            &mut processing_config,
         );
 
         assert!(executed_tx.execution_details.log_messages.is_none());
@@ -1940,7 +1959,7 @@ mod tests {
             loaded_accounts_data_size: 0,
         };
 
-        let processing_config = TransactionProcessingConfig {
+        let mut processing_config = TransactionProcessingConfig {
             recording_config: ExecutionRecordingConfig::new_single_setting(false),
             ..Default::default()
         };
@@ -1951,13 +1970,14 @@ mod tests {
         let _ = batch_processor.execute_loaded_transaction(
             &mock_bank,
             &sanitized_transaction,
+            0,
             &sysvar_cache,
             loaded_transaction,
             &mut ExecuteTimings::default(),
             &mut error_metrics,
             &mut program_cache_for_tx_batch,
             &get_mock_transaction_processing_environment(),
-            &processing_config,
+            &mut processing_config,
         );
 
         assert_eq!(error_metrics.instruction_error.0, 1);
