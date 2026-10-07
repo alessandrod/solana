@@ -77,7 +77,7 @@ use {
         bank_forks::BankForks,
         bank_forks_controller::{BankForksCommandReceiver, BankForksController},
         commitment::BlockCommitmentCache,
-        replay_events::ReplayEventFactories,
+        events::replay::ReplayEventFactories,
         snapshot_controller::SnapshotController,
         transaction_execution::TransactionStatusSender,
         validated_block_finalization::ValidatedBlockFinalizationCert,
