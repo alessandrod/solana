@@ -9704,6 +9704,7 @@ dependencies = [
  "bincode",
  "cfg-if 1.0.4",
  "itertools 0.15.0",
+ "libc",
  "libsecp256k1",
  "log",
  "openssl",
@@ -10910,6 +10911,7 @@ dependencies = [
 name = "solana-svm"
 version = "4.4.1"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-precompiles",
  "ahash 0.8.12",
