@@ -571,12 +571,12 @@ impl VoteStateHandler {
     /// `VoteStateVersions` is not supported by `VoteStateHandler`.
     pub fn try_new_from_vote_state_versions(
         versions: VoteStateVersions,
-    ) -> Result<Self, VoteStateVersions> {
+    ) -> Result<Self, InstructionError> {
         match versions {
             VoteStateVersions::V4(state) => Ok(Self::new_v4_boxed(state)),
             VoteStateVersions::V3(_)
             | VoteStateVersions::V1_14_11(_)
-            | VoteStateVersions::Uninitialized => Err(versions),
+            | VoteStateVersions::Uninitialized => Err(InstructionError::InvalidAccountData),
         }
     }
 
@@ -602,20 +602,14 @@ impl VoteStateHandler {
     /// Serializes `self` into the provided `data` buffer.
     ///
     /// Returns `Err(InstructionError::InvalidAccountData)` if serialization fails.
-    pub fn serialize_into(
-        self,
-        mut data: &mut [u8],
-    ) -> Result<VoteStateVersions, VoteStateVersions> {
+    pub fn serialize_into(self, mut data: &mut [u8]) -> Result<(), InstructionError> {
         match self.target_state {
             TargetVoteState::V4(v4) => {
                 let versioned = VoteStateVersions::V4(v4);
-                match wincode::serialize_into(&mut data, &versioned) {
-                    Ok(()) => {
-                        data.fill(0);
-                        Ok(versioned)
-                    }
-                    Err(_e) => Err(versioned),
-                }
+                wincode::serialize_into(&mut data, &versioned)
+                    .map_err(|_e| InstructionError::InvalidAccountData)?;
+                data.fill(0);
+                Ok(())
             }
         }
     }
@@ -682,8 +676,7 @@ fn landed_votes_from_lockouts(lockouts: VecDeque<Lockout>) -> VecDeque<LandedVot
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        crate::id,
+        crate::{id, vote_state::handler::*},
         solana_account::AccountSharedData,
         solana_clock::Clock,
         solana_epoch_schedule::MAX_LEADER_SCHEDULE_EPOCH_OFFSET,
@@ -773,6 +766,10 @@ mod tests {
         let mut expected = vec![0; data.len()];
         bincode::serialize_into(expected.as_mut_slice(), &versioned).unwrap();
 
+        assert_eq!(
+            VoteStateHandler::new_v4(state.clone()).serialize_into(&mut data[..written - 1]),
+            Err(InstructionError::InvalidAccountData)
+        );
         VoteStateHandler::new_v4(state)
             .serialize_into(&mut data)
             .unwrap();

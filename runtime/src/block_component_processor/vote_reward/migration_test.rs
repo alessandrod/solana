@@ -198,28 +198,23 @@ mod tests {
         }
 
         fn add_tower_rewards(&self, bank: Arc<Bank>) -> Arc<Bank> {
-            let vote_accounts = bank.vote_accounts();
-            let mut buffer = std::mem::MaybeUninit::uninit();
             for validator in &self.validators {
                 let vote_pubkey = validator.vote_keypair.pubkey();
-                let mut vote_state =
-                    VoteState::try_new(&vote_accounts, vote_pubkey, buffer, None).unwrap();
+                let mut vote_state = VoteState::try_new(&bank, vote_pubkey).unwrap();
                 vote_state
                     .handler
                     .increment_credits(bank.epoch(), self.pay_type.tower());
-                (buffer, _) = vote_state.serialize(&bank);
+                let (pubkey, account) = vote_state.serialize().unwrap();
+                bank.store_account(&pubkey, &account);
             }
             let slot = bank.slot() + 10;
             new_bank_from_parent(bank, slot)
         }
 
         fn add_ag_rewards(&self, bank: Arc<Bank>) -> Arc<Bank> {
-            let vote_accounts = bank.vote_accounts();
-            let mut buffer = std::mem::MaybeUninit::uninit();
             for validator in &self.validators {
                 let vote_pubkey = validator.vote_keypair.pubkey();
-                let mut vote_state =
-                    VoteState::try_new(&vote_accounts, vote_pubkey, buffer, None).unwrap();
+                let mut vote_state = VoteState::try_new(&bank, vote_pubkey).unwrap();
                 if let Some(ag_credits) = self.pay_type.ag() {
                     increment_credits(
                         vote_state.handler.epoch_credits_mut(),
@@ -228,7 +223,8 @@ mod tests {
                         ag_credits,
                     );
                 }
-                (buffer, _) = vote_state.serialize(&bank);
+                let (pubkey, account) = vote_state.serialize().unwrap();
+                bank.store_account(&pubkey, &account);
             }
             let slot = bank.slot() + 10;
             new_bank_from_parent(bank, slot)

@@ -98,6 +98,27 @@ impl VoteAccount {
         &self.0.account
     }
 
+    /// Returns the account only when both its inner object and data are exclusively owned.
+    pub fn try_into_unique_account(self) -> Option<AccountSharedData> {
+        debug!(
+            "vote-account-recycle: data_ptr={:p} vote_account_refs={} data_refs_before_drop_view={}",
+            self.0.account.data().as_ptr(),
+            Arc::strong_count(&self.0),
+            Arc::strong_count(&self.0.account.data_clone()) - 1,
+        );
+        let VoteAccountInner {
+            account,
+            vote_state_view,
+        } = Arc::try_unwrap(self.0).ok()?;
+        drop(vote_state_view);
+        debug!(
+            "vote-account-recycle: data_ptr={:p} data_refs_after_drop_view={}",
+            account.data().as_ptr(),
+            Arc::strong_count(&account.data_clone()) - 1,
+        );
+        (!account.is_shared()).then_some(account)
+    }
+
     pub fn lamports(&self) -> u64 {
         self.0.account.lamports()
     }
@@ -161,10 +182,6 @@ impl VoteAccount {
         );
         account.set_data_from_slice(&data);
         VoteAccount::try_from(account).unwrap()
-    }
-
-    pub fn into_data(self) -> Arc<Vec<u8>> {
-        self.account().data_clone()
     }
 }
 
@@ -587,7 +604,33 @@ impl FromIterator<(Pubkey, (/*stake:*/ u64, VoteAccount))> for VoteAccounts {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, solana_account::WritableAccount};
+    use {
+        crate::vote_account::*,
+        solana_account::WritableAccount,
+        solana_vote_interface::state::{VoteStateV4, VoteStateVersions},
+    };
+
+    #[test]
+    fn test_try_into_unique_account() {
+        let data = wincode::serialize(&VoteStateVersions::new_v4(VoteStateV4::default())).unwrap();
+        let mut account = AccountSharedData::new(1, 0, &solana_sdk_ids::vote::id());
+        account.set_data_from_slice(&data);
+        let vote_account = VoteAccount::try_from(account.clone()).unwrap();
+
+        assert!(vote_account.clone().try_into_unique_account().is_none());
+        assert_eq!(vote_account.account().data(), data);
+        assert!(vote_account.try_into_unique_account().is_none());
+        assert_eq!(account.data(), data);
+
+        let data_ptr = account.data().as_ptr();
+        let account = VoteAccount::try_from(account)
+            .unwrap()
+            .try_into_unique_account()
+            .unwrap();
+        assert!(!account.is_shared());
+        assert_eq!(account.data().as_ptr(), data_ptr);
+        assert_eq!(account.data(), data);
+    }
 
     #[test]
     #[should_panic(expected = "InvalidAccountData")]
