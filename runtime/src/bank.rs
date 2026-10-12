@@ -210,7 +210,7 @@ use {
     },
     solana_vote_interface::state::VoteStateV4,
     std::{
-        collections::{HashMap, HashSet},
+        collections::{HashMap, HashSet, VecDeque},
         fmt,
         ops::AddAssign,
         path::PathBuf,
@@ -1511,7 +1511,7 @@ impl Bank {
             measure_us!(RwLock::new(parent.blockhash_queue.read().unwrap().clone()));
 
         let (stakes_cache, stakes_cache_time_us) =
-            measure_us!(StakesCache::new(parent.stakes_cache.stakes().clone()));
+            measure_us!(parent.stakes_cache.clone_for_child());
 
         let (epoch_stakes, epoch_stakes_time_us) = measure_us!(parent.epoch_stakes.clone());
 
@@ -6031,6 +6031,10 @@ impl Bank {
     pub fn vote_accounts(&self) -> Arc<VoteAccountsHashMap> {
         let stakes = self.stakes_cache.stakes();
         Arc::from(stakes.vote_accounts())
+    }
+
+    pub(crate) fn swap_vote_account_buffers(&self, buffers: &mut VecDeque<AccountSharedData>) {
+        self.stakes_cache.swap_vote_account_buffers(buffers);
     }
 
     /// Vote account for the given vote account pubkey.

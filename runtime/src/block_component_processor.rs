@@ -780,8 +780,6 @@ impl BlockComponentProcessor {
             reward_cert,
             final_cert_input,
             block_producer_time_nanos,
-            #[cfg(test)]
-            |_| {},
         )?;
 
         if let Some(hash) = bank_hash {

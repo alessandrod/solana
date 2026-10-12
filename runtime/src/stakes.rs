@@ -26,7 +26,8 @@ use {
     solana_vote::vote_account::{VoteAccount, VoteAccounts, VoteAccountsHashMap},
     solana_vote_interface::state::VoteStateVersions,
     std::{
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
+        mem,
         sync::{Arc, RwLock, RwLockReadGuard},
     },
     thiserror::Error,
@@ -88,6 +89,23 @@ pub(crate) struct StakesCache(RwLock<Stakes<StakeAccount>>);
 impl StakesCache {
     pub(crate) fn new(stakes: Stakes<StakeAccount>) -> Self {
         Self(RwLock::new(stakes))
+    }
+
+    pub(crate) fn clone_for_child(&self) -> Self {
+        let mut parent = self.0.write().unwrap();
+        let mut child = parent.clone();
+        mem::swap(
+            parent.vote_accounts.account_buffers_mut(),
+            child.vote_accounts.account_buffers_mut(),
+        );
+        Self::new(child)
+    }
+
+    pub(crate) fn swap_vote_account_buffers(&self, buffers: &mut VecDeque<AccountSharedData>) {
+        mem::swap(
+            self.0.write().unwrap().vote_accounts.account_buffers_mut(),
+            buffers,
+        );
     }
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
@@ -527,12 +545,16 @@ impl Stakes<StakeAccount> {
         &mut self,
         next_epoch: Epoch,
         stake_history: StakeHistory,
-        vote_accounts: VoteAccounts,
+        mut vote_accounts: VoteAccounts,
         delegated_stakes: DelegatedStakes,
         inert_stake_delegations: &[Pubkey],
     ) {
         self.epoch = next_epoch;
         self.stake_history = stake_history;
+        mem::swap(
+            self.vote_accounts.account_buffers_mut(),
+            vote_accounts.account_buffers_mut(),
+        );
         self.vote_accounts = vote_accounts;
         self.delegated_stakes = delegated_stakes;
         // With SIMD-0599, inert delegations contribute no stake or points and
@@ -908,8 +930,7 @@ fn refresh_vote_accounts(
 #[cfg(test)]
 pub(crate) mod tests {
     use {
-        super::*,
-        crate::stake_utils,
+        crate::{stake_utils, stakes::*},
         rayon::ThreadPoolBuilder,
         solana_account::{WritableAccount, state_traits::StateMutWincode as _},
         solana_pubkey::Pubkey,
@@ -1042,6 +1063,46 @@ pub(crate) mod tests {
             rent,
             lamports,
         )
+    }
+
+    #[test]
+    fn test_vote_account_buffer_transfer() {
+        let vote_account = VoteAccount::new_random();
+        let snapshot = vote_account.clone();
+        let data_ptr = vote_account.account().data().as_ptr();
+        let mut buffers = VecDeque::from([AccountSharedData::from(vote_account)]);
+        let parent = StakesCache::default();
+        parent.swap_vote_account_buffers(&mut buffers);
+        assert!(buffers.is_empty());
+        assert!(
+            parent
+                .stakes()
+                .clone()
+                .vote_accounts
+                .account_buffers_mut()
+                .is_empty()
+        );
+
+        let child = parent.clone_for_child();
+        let sibling = parent.clone_for_child();
+        parent.swap_vote_account_buffers(&mut buffers);
+        assert!(buffers.is_empty());
+        sibling.swap_vote_account_buffers(&mut buffers);
+        assert!(buffers.is_empty());
+
+        child.activate_epoch(
+            1,
+            StakeHistory::default(),
+            VoteAccounts::default(),
+            DelegatedStakes::default(),
+            &[],
+        );
+        child.swap_vote_account_buffers(&mut buffers);
+        assert_eq!(buffers.len(), 1);
+        assert_eq!(buffers[0].data().as_ptr(), data_ptr);
+        assert!(buffers[0].is_shared());
+        drop(snapshot);
+        assert!(!buffers[0].is_shared());
     }
 
     #[test]

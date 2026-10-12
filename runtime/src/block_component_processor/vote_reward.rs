@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::block_component_processor::vote_reward::tests::VoteAccountRecycleEvent;
 use {
     crate::{bank::Bank, validated_reward_certificate::ValidatedRewardCert},
     agave_votor_messages::migration::AG_MIGRATION_EPOCH_CREDIT,
@@ -18,6 +16,7 @@ use {
         collections::{HashMap, HashSet, VecDeque},
         mem::{self, MaybeUninit},
         num::NonZero,
+        sync::Arc,
     },
     thiserror::Error,
     wincode::Deserialize,
@@ -25,6 +24,8 @@ use {
 
 pub(crate) mod epoch_inflation_account_state;
 mod migration_test;
+
+const MAX_VOTE_ACCOUNT_BUFFERS: usize = 200_000;
 
 /// Different types of errors that can happen when calculating and paying voting reward.
 ///
@@ -344,7 +345,6 @@ pub(super) fn calc_vote_rewards_update_vote_states(
     reward_cert: Option<ValidatedRewardCert>,
     final_cert_input: Option<(&HashSet<Pubkey>, Slot)>,
     block_producer_time_nanos: i64,
-    #[cfg(test)] mut on_recycle: impl FnMut(VoteAccountRecycleEvent<'_>),
 ) -> Result<(), CalcVoteRewardUpdateVoteStatesError> {
     let reward_state = match &reward_cert {
         Some(c) => Some(RewardState::try_new(
@@ -360,35 +360,50 @@ pub(super) fn calc_vote_rewards_update_vote_states(
     });
 
     let mut state_scratch = MaybeUninit::uninit();
-    let mut account_buffer = None;
+    let mut account_buffers = VecDeque::new();
+    bank.swap_vote_account_buffers(&mut account_buffers);
     let mut store_vote_state = |vote_state: VoteState| {
-        let Ok((pubkey, account)) =
-            vote_state.serialize_into(account_buffer.take().unwrap_or_default())
-        else {
+        let (destination, reused) = match account_buffers.pop_front() {
+            Some(buffer) => {
+                let shared = buffer.is_shared();
+                debug!(
+                    "vote-account-recycle: slot={} vote_pubkey={} candidate_data_ptr={:p} \
+                     candidate_data_refs={} shared={shared}",
+                    bank.slot(),
+                    vote_state.vote_pubkey,
+                    buffer.data().as_ptr(),
+                    Arc::strong_count(&buffer.data_clone()) - 1,
+                );
+                if shared {
+                    account_buffers.push_back(buffer);
+                    (AccountSharedData::default(), false)
+                } else {
+                    (buffer, true)
+                }
+            }
+            None => (AccountSharedData::default(), false),
+        };
+        let Ok((pubkey, account)) = vote_state.serialize_into(destination) else {
             return;
         };
         let old_vote_account = bank.store_account_return_old(&pubkey, &account);
-        #[cfg(test)]
-        on_recycle(VoteAccountRecycleEvent::Stored {
-            pubkey,
-            old: old_vote_account.as_ref(),
-            updated: &account,
-        });
         let old_data_ptr = old_vote_account
             .as_ref()
             .map(|old| old.account().data().as_ptr());
-        account_buffer = old_vote_account.and_then(VoteAccount::try_into_unique_account);
+        if account_buffers.len() < MAX_VOTE_ACCOUNT_BUFFERS
+            && let Some(old_vote_account) = old_vote_account
+        {
+            account_buffers.push_back(old_vote_account.into());
+        }
         debug!(
             "vote-account-recycle: slot={} vote_pubkey={pubkey} old_data_ptr={old_data_ptr:?} \
-             serialized_data_ptr={:p} reclaimed={}",
+             serialized_data_ptr={:p} reused={reused} pool_len={}",
             bank.slot(),
             account.data().as_ptr(),
-            account_buffer.is_some(),
+            account_buffers.len(),
         );
-        #[cfg(test)]
-        on_recycle(VoteAccountRecycleEvent::Reclaimed(account_buffer.as_ref()));
     };
-    match (&reward_state, &final_cert_state) {
+    let result = match (&reward_state, &final_cert_state) {
         (None, None) => Ok(()),
         (Some(state), None) => {
             let mut leader_reward = 0;
@@ -488,7 +503,9 @@ pub(super) fn calc_vote_rewards_update_vote_states(
             }
             Ok(())
         }
-    }
+    };
+    bank.swap_vote_account_buffers(&mut account_buffers);
+    result
 }
 
 /// Computes the voting reward in Lamports.
@@ -650,15 +667,6 @@ mod tests {
         test_case::test_matrix,
     };
 
-    pub(crate) enum VoteAccountRecycleEvent<'a> {
-        Stored {
-            pubkey: Pubkey,
-            old: Option<&'a VoteAccount>,
-            updated: &'a AccountSharedData,
-        },
-        Reclaimed(Option<&'a AccountSharedData>),
-    }
-
     fn new_bank_for_tests(
         leader: SlotLeader,
         genesis_config: &GenesisConfig,
@@ -808,7 +816,6 @@ mod tests {
             )),
             None,
             block_producer_time_nanos,
-            |_| {},
         )
         .unwrap();
         let slot_timestamp = BlockTimestamp {
@@ -917,7 +924,6 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() as i64,
-            |_| {},
         )
         .unwrap();
 
@@ -990,7 +996,6 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() as i64,
-            |_| {},
         )
         .unwrap();
 
@@ -1054,7 +1059,6 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() as i64,
-            |_| {},
         )
         .unwrap();
         let vote_accounts = bank.vote_accounts();
@@ -1440,19 +1444,6 @@ mod tests {
                  reward_slot={reward_slot}",
                 looping_bank.slot()
             );
-            // Give this slot its own account versions, independent of parent and epoch snapshots.
-            for vote_pubkey in &validators_to_reward {
-                let (pubkey, account) = VoteState::try_new(&looping_bank, *vote_pubkey)
-                    .unwrap()
-                    .serialize()
-                    .unwrap();
-                looping_bank.store_account(&pubkey, &account);
-            }
-
-            let mut old_data_ptr = None;
-            let mut reclaimed_data_ptr = None;
-            let mut serialized_accounts = 0;
-            let mut reused_accounts = 0;
             let reward_cert =
                 ValidatedRewardCert::new_for_tests(reward_slot, validators_to_reward.clone());
             calc_vote_rewards_update_vote_states(
@@ -1463,35 +1454,8 @@ mod tests {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as i64,
-                |event| match event {
-                    VoteAccountRecycleEvent::Stored {
-                        pubkey,
-                        old,
-                        updated,
-                    } => {
-                        assert_eq!(
-                            looping_bank.get_account(&pubkey).unwrap().data().as_ptr(),
-                            updated.data().as_ptr()
-                        );
-                        if let Some(data_ptr) = reclaimed_data_ptr.take() {
-                            assert_eq!(updated.data().as_ptr(), data_ptr);
-                            reused_accounts += 1;
-                        }
-                        old_data_ptr = Some(old.unwrap().account().data().as_ptr());
-                        serialized_accounts += 1;
-                    }
-                    VoteAccountRecycleEvent::Reclaimed(account) => {
-                        let account = account.unwrap();
-                        assert!(!account.is_shared());
-                        let data_ptr = account.data().as_ptr();
-                        assert_eq!(data_ptr, old_data_ptr.take().unwrap());
-                        reclaimed_data_ptr = Some(data_ptr);
-                    }
-                },
             )
             .unwrap();
-            assert_eq!(serialized_accounts, validators_to_reward.len());
-            assert!(reused_accounts > 0);
 
             let slot = looping_bank.slot() + 1;
             looping_bank = new_bank_from_parent(looping_bank, slot);
@@ -1541,6 +1505,36 @@ mod tests {
         let final_bank =
             test_vote_reward_payout_impl(&state.validators, initial_bank.clone(), num_reward_slots);
         state.validate_rewards(&initial_bank, &final_bank, num_reward_slots);
+
+        let mut account_buffers = VecDeque::new();
+        final_bank.swap_vote_account_buffers(&mut account_buffers);
+        assert_eq!(
+            account_buffers.len() as u64,
+            num_validators * num_reward_slots
+        );
+        assert!(account_buffers.iter().all(AccountSharedData::is_shared));
+        final_bank.swap_vote_account_buffers(&mut account_buffers);
+
+        drop(initial_bank);
+        final_bank.squash();
+        final_bank.force_flush_accounts_cache();
+        final_bank.swap_vote_account_buffers(&mut account_buffers);
+        let (ready_index, ready_account) = account_buffers
+            .iter()
+            .enumerate()
+            .find(|(_, account)| !account.is_shared())
+            .unwrap();
+        let ready_data_ptr = ready_account.data().as_ptr();
+        let reuse_slots = (ready_index as u64 + 1).div_ceil(num_validators);
+        final_bank.swap_vote_account_buffers(&mut account_buffers);
+
+        // Process certificates through the first buffer released by rooting and flushing.
+        let bank = new_bank_from_parent(final_bank.clone(), final_bank.slot() + 1);
+        let bank = reward_validators(bank, &state.validators, reuse_slots);
+        assert!(state.validators.iter().any(|validator| {
+            let account = bank.get_account(&validator.vote_keypair.pubkey()).unwrap();
+            account.data().as_ptr() == ready_data_ptr
+        }));
     }
 
     #[test_matrix([0, 1_000, 10_000])]
@@ -1742,7 +1736,6 @@ mod tests {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as i64,
-                |_| {},
             )
             .unwrap();
         }
