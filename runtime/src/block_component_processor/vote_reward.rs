@@ -15,7 +15,7 @@ use {
     },
     solana_vote_program::vote_state::handler::VoteStateHandler,
     std::{
-        collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
+        collections::{HashMap, HashSet, VecDeque},
         num::NonZero,
     },
     thiserror::Error,
@@ -29,21 +29,8 @@ mod migration_test;
 /// These errors should cause the processing of the bank to fail.
 #[derive(Debug, Error)]
 pub enum CalcVoteRewardUpdateVoteStatesError {
-    #[error("allocating accounts failed with {0}")]
-    AllocateAccounts(#[from] AllocateAccountsError),
     #[error("Processing reward state failed with {0}")]
     RewardState(#[from] RewardStateError),
-}
-
-/// Different types of error that happen when allocating memory for storing updated accounts.
-///
-/// These errors should cause the processing of the bank to fail.
-#[derive(Debug, Error)]
-pub enum AllocateAccountsError {
-    #[error("did not find rank map for final_slot={final_slot} in bank_slot={bank_slot}")]
-    FinalCert { bank_slot: Slot, final_slot: Slot },
-    #[error("did not find rank map for reward_slot={reward_slot} in bank_slot={bank_slot}")]
-    RewardCert { bank_slot: Slot, reward_slot: Slot },
 }
 
 /// Different types of error that happen when looking up state to process the reward cert.
@@ -335,50 +322,15 @@ impl<'a> FinalCertState<'a> {
     }
 }
 
-/// Allocates storage for updated accounts.
-fn allocate_updated_accounts(
-    bank: &Bank,
-    reward_cert: &Option<ValidatedRewardCert>,
-    final_cert_input: &Option<(&HashSet<Pubkey>, Slot)>,
-) -> Result<Option<HashMap<Pubkey, VoteState>>, AllocateAccountsError> {
-    let max_validators = match (&reward_cert, &final_cert_input) {
-        (None, None) => return Ok(None),
-        (Some(cert), None) => {
-            // Adding one in the off chance that the current leader is not in the cert.
-            cert.validators().len() + 1
-        }
-        (None, Some((signers, _))) => signers.len(),
-        (Some(reward_cert), Some((_, slot))) => {
-            // Both finalization cert and reward cert are present.  Instead of computing overlap,
-            // use max validators.
-            let final_cert_slot_max_validators = bank
-                .get_rank_map(*slot)
-                .ok_or(AllocateAccountsError::FinalCert {
-                    bank_slot: bank.slot(),
-                    final_slot: *slot,
-                })?
-                .len();
-            let reward_cert_slot_max_validators = bank
-                .get_rank_map(reward_cert.slot())
-                .ok_or(AllocateAccountsError::RewardCert {
-                    bank_slot: bank.slot(),
-                    reward_slot: reward_cert.slot(),
-                })?
-                .len();
-            final_cert_slot_max_validators.max(reward_cert_slot_max_validators)
-        }
-    };
-    Ok(Some(HashMap::with_capacity(max_validators)))
-}
-
 fn update_accounts(
+    bank: &Bank,
     reward_state: &Option<RewardState>,
     final_cert_state: &Option<FinalCertState>,
     vote_accounts: &HashMap<Pubkey, (u64, VoteAccount)>,
-    mut updated_accounts: HashMap<Pubkey, VoteState>,
     validators: impl Iterator<Item = Pubkey>,
-) -> Result<Vec<(Pubkey, AccountSharedData)>, CalcVoteRewardUpdateVoteStatesError> {
+) -> Result<(), CalcVoteRewardUpdateVoteStatesError> {
     let mut leader_reward = 0;
+    let mut leader_vote_state = None;
     for validator in validators {
         let Some(mut vote_state) = VoteState::try_new(vote_accounts, validator) else {
             continue;
@@ -395,7 +347,13 @@ fn update_accounts(
             }
         };
         if account_updated {
-            updated_accounts.insert(vote_state.vote_pubkey, vote_state);
+            if let Some(state) = reward_state
+                && validator == state.leader_vote_pubkey
+            {
+                leader_vote_state = Some(vote_state);
+            } else if let Some((pubkey, account)) = vote_state.serialize() {
+                bank.store_account(&pubkey, &account);
+            }
         }
     }
 
@@ -403,25 +361,20 @@ fn update_accounts(
     if let Some(state) = &reward_state
         && let Some(leader_reward) = NonZero::new(leader_reward)
     {
-        match updated_accounts.entry(state.leader_vote_pubkey) {
-            Entry::Occupied(e) => {
-                state.update_leader(e.into_mut(), leader_reward);
-            }
-            Entry::Vacant(e) => {
-                if let Some(mut vote_state) =
-                    VoteState::try_new(vote_accounts, state.leader_vote_pubkey)
-                {
-                    state.update_leader(&mut vote_state, leader_reward);
-                    e.insert(vote_state);
-                }
-            }
+        if leader_vote_state.is_none() {
+            leader_vote_state = VoteState::try_new(vote_accounts, state.leader_vote_pubkey);
+        }
+        if let Some(vote_state) = &mut leader_vote_state {
+            state.update_leader(vote_state, leader_reward);
         }
     }
 
-    Ok(updated_accounts
-        .into_values()
-        .filter_map(|vote_state| vote_state.serialize())
-        .collect())
+    if let Some(vote_state) = leader_vote_state
+        && let Some((pubkey, account)) = vote_state.serialize()
+    {
+        bank.store_account(&pubkey, &account);
+    }
+    Ok(())
 }
 
 /// Calculates voting rewards based on the `reward_cert` and updates fields in the vote account
@@ -432,10 +385,9 @@ pub(super) fn calc_vote_rewards_update_vote_states(
     final_cert_input: Option<(&HashSet<Pubkey>, Slot)>,
     block_producer_time_nanos: i64,
 ) -> Result<(), CalcVoteRewardUpdateVoteStatesError> {
-    let Some(updated_accounts) = allocate_updated_accounts(bank, &reward_cert, &final_cert_input)?
-    else {
+    if reward_cert.is_none() && final_cert_input.is_none() {
         return Ok(());
-    };
+    }
     let reward_state = match &reward_cert {
         Some(c) => Some(RewardState::try_new(
             bank,
@@ -450,33 +402,30 @@ pub(super) fn calc_vote_rewards_update_vote_states(
     });
     let vote_accounts = bank.vote_accounts();
 
-    let updated_accounts = match (&reward_state, &final_cert_state) {
-        (None, None) => return Ok(()),
+    match (&reward_state, &final_cert_state) {
+        (None, None) => Ok(()),
         (Some(state), None) => update_accounts(
+            bank,
             &reward_state,
             &final_cert_state,
             &vote_accounts,
-            updated_accounts,
             state.reward_validators.iter().cloned(),
-        )?,
+        ),
         (None, Some(state)) => update_accounts(
+            bank,
             &reward_state,
             &final_cert_state,
             &vote_accounts,
-            updated_accounts,
             state.signers.iter().cloned(),
-        )?,
+        ),
         (Some(r_state), Some(f_state)) => update_accounts(
+            bank,
             &reward_state,
             &final_cert_state,
             &vote_accounts,
-            updated_accounts,
             r_state.reward_validators.union(f_state.signers).cloned(),
-        )?,
-    };
-
-    bank.store_accounts((bank.slot(), updated_accounts.as_slice()), None);
-    Ok(())
+        ),
+    }
 }
 
 /// Computes the voting reward in Lamports.
@@ -597,9 +546,9 @@ fn increment_credits(
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
         crate::{
             bank_forks::BankForks,
+            block_component_processor::vote_reward::*,
             genesis_utils::{
                 ValidatorVoteKeypairs, activate_all_features_alpenglow,
                 create_genesis_config_with_alpenglow_vote_accounts,
@@ -841,8 +790,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn calculate_and_pay_sets_root_slot_for_signer_in_final_cert() {
+    #[test_matrix([true, false], [None, Some(0), Some(1_000_000_000_000)])]
+    fn calculate_and_pay_sets_root_slot_for_signer_in_final_cert(
+        leader_signs: bool,
+        reward_capitalization: Option<u64>,
+    ) {
         let validator_keypairs = (0..4)
             .map(|_| ValidatorVoteKeypairs::new_rand())
             .collect::<Vec<_>>();
@@ -862,7 +814,11 @@ mod tests {
             id: leader_node_pubkey,
             vote_address: leader_vote_pubkey,
         };
-        let target_vote_pubkey = validator_keypairs[1].vote_keypair.pubkey();
+        let target_vote_pubkey = if leader_signs {
+            leader_vote_pubkey
+        } else {
+            validator_keypairs[1].vote_keypair.pubkey()
+        };
 
         let (prev_bank, _bank_forks) = new_bank_for_tests(slot_leader, &genesis_config);
         let current_slot = prev_bank
@@ -871,6 +827,16 @@ mod tests {
             + NUM_SLOTS_FOR_REWARD;
         let bank = new_bank_from_parent(prev_bank.clone(), current_slot);
         let reward_slot = current_slot - NUM_SLOTS_FOR_REWARD;
+
+        if let Some(capitalization) = reward_capitalization {
+            EpochInflationAccountState::new_epoch_update_account(&bank, capitalization, 0);
+        }
+        let num_updated_accounts = bank.get_bank_hash_stats().num_updated_accounts;
+        calc_vote_rewards_update_vote_states(&bank, None, None, 0).unwrap();
+        assert_eq!(
+            bank.get_bank_hash_stats().num_updated_accounts,
+            num_updated_accounts
+        );
 
         let cert_rank = {
             let rank_map = bank
@@ -891,10 +857,8 @@ mod tests {
 
         calc_vote_rewards_update_vote_states(
             &bank,
-            Some(ValidatedRewardCert::new_for_tests(
-                reward_slot,
-                vec![target_vote_pubkey],
-            )),
+            reward_capitalization
+                .map(|_| ValidatedRewardCert::new_for_tests(reward_slot, vec![target_vote_pubkey])),
             final_cert_input,
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -909,6 +873,35 @@ mod tests {
         assert_eq!(
             handle.votes().front().unwrap().lockout.slot(),
             final_cert.slot().slot().max(reward_slot)
+        );
+
+        let (validator_reward, leader_reward) =
+            reward_capitalization.map_or((0, 0), |capitalization| {
+                calc_reward_for_test(
+                    &bank,
+                    capitalization,
+                    bank.epoch(),
+                    bank.epoch_stakes_from_slot(reward_slot)
+                        .unwrap()
+                        .total_stake(),
+                    per_validator_stake,
+                )
+            });
+        assert_eq!(
+            handle.epoch_credits().last().map_or(0, |entry| entry.1),
+            validator_reward + if leader_signs { leader_reward } else { 0 }
+        );
+        let leader_handle = vote_state_from_bank(&bank, &leader_vote_pubkey);
+        assert_eq!(
+            leader_handle
+                .epoch_credits()
+                .last()
+                .map_or(0, |entry| entry.1),
+            leader_reward + if leader_signs { validator_reward } else { 0 }
+        );
+        assert_eq!(
+            bank.get_bank_hash_stats().num_updated_accounts - num_updated_accounts,
+            1 + u64::from(!leader_signs && leader_reward != 0)
         );
     }
 
