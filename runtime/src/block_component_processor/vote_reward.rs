@@ -91,7 +91,7 @@ impl VoteState {
             info!("did not find vote account for vote_pubkey={vote_pubkey}");
             return None;
         };
-        let versions = match bincode::deserialize(account.account().data()) {
+        let versions = match wincode::deserialize(account.account().data()) {
             Ok(s) => s,
             Err(e) => {
                 info!("bincode::deserialize for vote_pubkey={vote_pubkey} failed with {e}");
