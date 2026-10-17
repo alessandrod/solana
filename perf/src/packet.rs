@@ -12,6 +12,7 @@ use {
     bytes::Bytes,
     rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator},
     serde::{Deserialize, Serialize},
+    solana_runtime_transaction::transaction_trace::TransactionTraceContext,
     std::{
         io::Cursor,
         net::SocketAddr,
@@ -109,11 +110,18 @@ pub struct BytesPacket {
     )]
     buffer: Bytes,
     meta: Meta,
+    #[serde(skip)]
+    #[cfg_attr(feature = "stable-abi", stable_abi_sample(skip))]
+    pub trace: Option<TransactionTraceContext>,
 }
 
 impl BytesPacket {
     pub fn new(buffer: Bytes, meta: Meta) -> Self {
-        Self { buffer, meta }
+        Self {
+            buffer,
+            meta,
+            trace: None,
+        }
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -121,6 +129,7 @@ impl BytesPacket {
         Self {
             buffer: Bytes::new(),
             meta: Meta::default(),
+            trace: None,
         }
     }
 
@@ -133,7 +142,11 @@ impl BytesPacket {
             meta.set_socket_addr(dest);
         }
 
-        Self { buffer, meta }
+        Self {
+            buffer,
+            meta,
+            trace: None,
+        }
     }
 
     #[cfg(feature = "dev-context-only-utils")]
@@ -144,7 +157,11 @@ impl BytesPacket {
         let buffer = Bytes::from(wincode::serialize(&data)?);
         let mut meta = Meta::default();
         meta.size = buffer.len();
-        Ok(Self { buffer, meta })
+        Ok(Self {
+            buffer,
+            meta,
+            trace: None,
+        })
     }
 
     #[inline]

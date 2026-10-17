@@ -14,6 +14,7 @@ use {
         replay_stage::{Finalizer, ReplayStage},
     },
     agave_bls_sigverify::rewards::RewardInput,
+    agave_event_system::{PublisherFactory, publisher::Publisher},
     agave_votor::{event::LeaderWindowInfo, slot_clock::SharedAlpenglowSlotClock},
     agave_votor_messages::{
         consensus_message::{Block, BlockId},
@@ -52,7 +53,8 @@ use {
         validated_block_finalization::ValidatedBlockFinalizationCert,
         validated_reward_certificate::ValidatedRewardCert,
     },
-    solana_transaction::versioned::VersionedTransaction,
+    solana_runtime_transaction::recording_transaction::RecordingTransaction,
+    solana_streamer::events::{IngressDropReason, IngressEvent, publish_ingress_drops},
     solana_version::version,
     stats::{LoopMetrics, SlotMetrics},
     std::{
@@ -163,6 +165,7 @@ pub struct BlockCreationLoopConfig {
 
     /// Sender for packets to banking stage (used to re-inject transactions after sad leader handover).
     pub banking_stage_sender: BankingPacketSender,
+    pub ingress_events: Option<PublisherFactory<IngressEvent>>,
 }
 
 struct LeaderContext {
@@ -193,6 +196,7 @@ struct LeaderContext {
     reward_certs_requestor: CertsRequestor,
     /// Banking-stage ingress used to reschedule transactions after sad handover.
     banking_stage_sender: BankingPacketSender,
+    ingress_events: Option<Publisher<IngressEvent>>,
 
     // Metrics
     metrics: LoopMetrics,
@@ -281,6 +285,7 @@ fn start_loop(config: BlockCreationLoopConfig, reward_certs_requestor: CertsRequ
         optimistic_parent_receiver,
         highest_finalized,
         banking_stage_sender,
+        ingress_events,
         sharable_banks,
         alpenglow_slot_clock,
     } = config;
@@ -301,6 +306,8 @@ fn start_loop(config: BlockCreationLoopConfig, reward_certs_requestor: CertsRequ
             return;
         }
     };
+
+    poh_recorder.read().unwrap().initialize_transaction_events();
 
     let genesis_cert = bank_forks
         .read()
@@ -335,6 +342,7 @@ fn start_loop(config: BlockCreationLoopConfig, reward_certs_requestor: CertsRequ
         replay_highest_frozen,
         reward_certs_requestor,
         banking_stage_sender,
+        ingress_events: ingress_events.and_then(|factory| factory.try_create_publisher()),
         metrics: LoopMetrics::default(),
         highest_finalized,
         genesis_cert_block_marker,
@@ -935,7 +943,7 @@ fn process_parent_ready(
     info: LeaderWindowInfo,
     bank_slot: Slot,
     optimistic_parent: &mut Option<Block>,
-    accumulated_txs: &mut Vec<VersionedTransaction>,
+    accumulated_txs: &mut Vec<RecordingTransaction>,
     block_timer: &mut Instant,
     records_shutdown: &mut bool,
 ) -> Result<bool, PohRecorderError> {
@@ -1028,7 +1036,7 @@ fn handle_parent_ready(
     slot_metrics: &mut SlotMetrics,
     leader_window_info: LeaderWindowInfo,
     optimistic_parent_block: Block,
-    mut accumulated_txs: Vec<VersionedTransaction>,
+    mut accumulated_txs: Vec<RecordingTransaction>,
     block_timer: &mut Instant,
 ) -> Result<Option<Arc<Bank>>, PohRecorderError> {
     if leader_window_info.parent_block == optimistic_parent_block {
@@ -1123,7 +1131,7 @@ fn handle_parent_ready(
     let packets: Vec<BytesPacket> = accumulated_txs
         .iter()
         .filter_map(|tx| {
-            let serialized = wincode::serialize(tx)
+            let serialized = wincode::serialize(&tx.transaction)
                 .inspect_err(|e| {
                     error!(
                         "failed to serialize transaction for rescheduling - this should never \
@@ -1134,7 +1142,9 @@ fn handle_parent_ready(
             let buffer = Bytes::from(serialized);
             let mut meta = Meta::default();
             meta.size = buffer.len();
-            Some(BytesPacket::new(buffer, meta))
+            let mut packet = BytesPacket::new(buffer, meta);
+            packet.trace = tx.trace;
+            Some(packet)
         })
         .collect();
 
@@ -1147,10 +1157,13 @@ fn handle_parent_ready(
         let batch: PacketBatch = packets.into();
         let banking_packet_batch = Arc::new(batch);
         ctx.banking_stage_sender
-            // technically this send can evict to make room (which may drop a few packets)
-            // but this should (hopefully) not be significant amounts since we are evicting
-            // at most 1 batch.
-            .send(banking_packet_batch)
+            .send_with_on_drop(banking_packet_batch, |batch| {
+                publish_ingress_drops(
+                    &mut ctx.ingress_events,
+                    batch.iter(),
+                    IngressDropReason::Capacity,
+                );
+            })
             .map_err(|_| PohRecorderError::RescheduleTransactionsError(slot))?;
     }
 
@@ -1171,7 +1184,7 @@ fn update_leader_window_clock(ctx: &LeaderContext, slot: Slot, started_at: Insta
 fn shutdown_and_drain_record_receiver(
     poh_recorder: &RwLock<PohRecorder>,
     record_receiver: &mut RecordReceiver,
-    mut accumulated_txs: Option<&mut Vec<VersionedTransaction>>,
+    mut accumulated_txs: Option<&mut Vec<RecordingTransaction>>,
 ) -> Result<(), PohRecorderError> {
     record_receiver.shutdown();
 
@@ -1546,6 +1559,7 @@ mod tests {
             transaction_execution::TransactionStatusMessage,
         },
         solana_system_transaction as system_transaction,
+        solana_transaction::versioned::VersionedTransaction,
         std::num::NonZeroUsize,
     };
 
@@ -1778,6 +1792,7 @@ mod tests {
             replay_highest_frozen: Arc::new(ReplayHighestFrozen::default()),
             reward_certs_requestor,
             banking_stage_sender,
+            ingress_events: None,
             metrics: LoopMetrics::default(),
             genesis_cert_block_marker: test_genesis_cert_block_marker(),
         };
@@ -1895,6 +1910,7 @@ mod tests {
             replay_highest_frozen: Arc::new(ReplayHighestFrozen::default()),
             reward_certs_requestor,
             banking_stage_sender,
+            ingress_events: None,
             metrics: LoopMetrics::default(),
             genesis_cert_block_marker: test_genesis_cert_block_marker(),
         };
@@ -2011,6 +2027,7 @@ mod tests {
             replay_highest_frozen: Arc::new(ReplayHighestFrozen::default()),
             reward_certs_requestor,
             banking_stage_sender,
+            ingress_events: None,
             metrics: LoopMetrics::default(),
             genesis_cert_block_marker,
         };
@@ -2083,6 +2100,7 @@ mod tests {
             replay_highest_frozen: Arc::new(ReplayHighestFrozen::default()),
             reward_certs_requestor,
             banking_stage_sender,
+            ingress_events: None,
             metrics: LoopMetrics::default(),
             genesis_cert_block_marker: test_genesis_cert_block_marker(),
         };
@@ -2092,7 +2110,7 @@ mod tests {
         record_sender
             .try_send(Record::new(
                 Hash::new_unique(),
-                vec![versioned_transfer(1)],
+                vec![versioned_transfer(1).into()],
                 bank_id,
             ))
             .unwrap();
@@ -2206,6 +2224,7 @@ mod tests {
             replay_highest_frozen: Arc::new(ReplayHighestFrozen::default()),
             reward_certs_requestor,
             banking_stage_sender,
+            ingress_events: None,
             metrics: LoopMetrics::default(),
             genesis_cert_block_marker: test_genesis_cert_block_marker(),
         };
@@ -2224,8 +2243,8 @@ mod tests {
             optimistic_parent_bank_id
         );
 
-        let accumulated_tx = versioned_transfer(1);
-        let drained_tx = versioned_transfer(2);
+        let accumulated_tx = RecordingTransaction::from(versioned_transfer(1));
+        let drained_tx = RecordingTransaction::from(versioned_transfer(2));
         record_sender
             .try_send(Record::new(
                 Hash::new_unique(),
@@ -2351,8 +2370,8 @@ mod tests {
 
         let rescheduled = recv_rescheduled_transactions(&banking_stage_receiver);
         assert_eq!(rescheduled.len(), 2);
-        assert!(rescheduled.contains(&accumulated_tx));
-        assert!(rescheduled.contains(&drained_tx));
+        assert!(rescheduled.contains(&accumulated_tx.transaction));
+        assert!(rescheduled.contains(&drained_tx.transaction));
 
         drop(leader_window_info_sender);
     }

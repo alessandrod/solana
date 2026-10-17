@@ -150,7 +150,10 @@ fn bench_poh_recorder_record(bencher: &mut Bencher) {
         SanitizedTransaction::from_transaction_for_tests(test_tx()),
     ];
 
-    let txs: Vec<_> = txs.iter().map(|tx| tx.to_versioned_transaction()).collect();
+    let txs: Vec<_> = txs
+        .iter()
+        .map(|tx| tx.to_versioned_transaction().into())
+        .collect();
     bencher.iter(|| {
         let _record_result = poh_recorder
             .record(bank.bank_id(), black_box(h1), black_box(txs.clone()))

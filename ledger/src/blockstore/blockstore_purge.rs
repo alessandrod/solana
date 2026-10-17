@@ -646,12 +646,13 @@ impl Blockstore {
     }
 
     /// Removes transaction history for the provided ordered transactions in a slot.
-    pub fn purge_transaction_history_for_slot_transactions_exact(
+    pub fn purge_transaction_history_for_slot_transactions_exact<'a>(
         &self,
         slot: Slot,
-        transactions: &[VersionedTransaction],
+        transactions: impl IntoIterator<Item = &'a VersionedTransaction, IntoIter: ExactSizeIterator>,
     ) -> Result<TransactionHistoryPurgeStats> {
-        if transactions.is_empty() {
+        let transactions = transactions.into_iter();
+        if transactions.len() == 0 {
             return Ok(TransactionHistoryPurgeStats::default());
         }
 
@@ -659,7 +660,7 @@ impl Blockstore {
         let mut stats = TransactionHistoryPurgeStats::default();
         let mut prepare_deletions_timer = Measure::start("prepare_transaction_history_deletions");
 
-        for (transaction_index, transaction) in transactions.iter().enumerate() {
+        for (transaction_index, transaction) in transactions.enumerate() {
             if let Some(&signature) = transaction.signatures.first() {
                 let meta = self
                     .read_transaction_status((signature, slot))?

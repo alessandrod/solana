@@ -14,6 +14,7 @@ use {
             consume_worker::ConsumeWorkerMetrics,
             consumer::Consumer,
             decision_maker::{BufferedPacketsDecision, DecisionMaker},
+            events::{BankingDropReason, TransactionEvent, publish_banking_drop},
             transaction_scheduler::{
                 receive_and_buffer::ReceivingStats, transaction_priority_id::TransactionPriorityId,
                 transaction_state_container::StateContainer,
@@ -22,10 +23,12 @@ use {
         validator::SchedulerPacing,
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
+    agave_event_system::PublisherFactory,
     solana_clock::DEFAULT_MS_PER_SLOT,
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
     solana_runtime::{bank::BankId, bank_forks::SharableBanks},
+    solana_runtime_transaction::transaction_meta::TransactionMeta,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
         num::{NonZeroU64, Saturating},
@@ -188,13 +191,16 @@ where
         decision_maker: DecisionMaker,
         receive_and_buffer: R,
         sharable_banks: SharableBanks,
-        scheduler: S,
+        mut scheduler: S,
+        transaction_events: Option<PublisherFactory<TransactionEvent>>,
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         priority_floor: Arc<SchedulerPriorityFloor>,
     ) -> Self {
         priority_floor.clear();
         let container_capacity = TOTAL_BUFFERED_PACKETS;
         let saturation_state = SaturationState::new(priority_floor, container_capacity);
+        scheduler.scheduling_common_mut().transaction_events =
+            transaction_events.and_then(|factory| factory.try_create_publisher());
         Self {
             exit,
             config,
@@ -425,7 +431,12 @@ where
     fn clear_container(&mut self) {
         let mut num_dropped_on_clear = Saturating::<usize>(0);
         while let Some(id) = self.container.pop() {
-            self.container.remove_by_id(id.id);
+            let removed = self.container.remove_by_id(id.id);
+            publish_banking_drop(
+                &mut self.scheduler.scheduling_common_mut().transaction_events,
+                removed.transaction().transaction_trace(),
+                BankingDropReason::NotLeader,
+            );
             num_dropped_on_clear += 1;
         }
 
@@ -491,7 +502,12 @@ where
         for (result, pid) in results.iter().zip(self.recheck_chunk.iter()) {
             if result.is_err() {
                 num_dropped += 1;
-                self.container.remove_by_id(pid.id);
+                let removed = self.container.remove_by_id(pid.id);
+                publish_banking_drop(
+                    &mut self.scheduler.scheduling_common_mut().transaction_events,
+                    removed.transaction().transaction_trace(),
+                    BankingDropReason::InvalidTransaction,
+                );
             }
         }
 
@@ -521,13 +537,19 @@ where
         &mut self,
         decision: &BufferedPacketsDecision,
     ) -> Result<ReceivingStats, DisconnectedError> {
-        self.receive_and_buffer
-            .receive_and_buffer_packets(&mut self.container, decision)
+        self.receive_and_buffer.receive_and_buffer_packets(
+            &mut self.container,
+            decision,
+            &mut self.scheduler.scheduling_common_mut().transaction_events,
+        )
     }
 
     fn drain_check_results(&mut self, decision: &BufferedPacketsDecision) -> ReceivingStats {
-        self.receive_and_buffer
-            .drain_check_results(&mut self.container, decision)
+        self.receive_and_buffer.drain_check_results(
+            &mut self.container,
+            decision,
+            &mut self.scheduler.scheduling_common_mut().transaction_events,
+        )
     }
 
     fn update_receiving_metrics(&mut self, receiving_stats: &ReceivingStats) {
@@ -611,6 +633,7 @@ mod tests {
         crate::banking_stage::{
             TransactionViewReceiveAndBuffer,
             consumer::{RetryableIndex, TARGET_NUM_TRANSACTIONS_PER_BATCH},
+            events::RetryReason,
             scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId},
             tests::create_slow_genesis_config,
             transaction_scheduler::{
@@ -772,6 +795,7 @@ mod tests {
             receive_and_buffer,
             bank_forks.read().unwrap().sharable_banks(),
             scheduler,
+            None,
             vec![], // no actual workers with metrics to report, this can be empty
             Arc::new(SchedulerPriorityFloor::default()),
         );
@@ -1339,7 +1363,7 @@ mod tests {
         finished_consume_work_sender
             .send(FinishedConsumeWork {
                 work: consume_work,
-                retryable_indexes: vec![RetryableIndex::new(1, true)],
+                retryable_indexes: vec![RetryableIndex::new(1, RetryReason::AccountInUse)],
             })
             .unwrap();
 

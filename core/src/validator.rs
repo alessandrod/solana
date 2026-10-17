@@ -5,7 +5,14 @@ use {
     crate::{
         admin_rpc_post_init::{AdminRpcRequestMetadataPostInit, KeyUpdaterType, KeyUpdaters},
         banking_stage::{
-            BankingStage, transaction_scheduler::scheduler_controller::SchedulerConfig,
+            BankingStage,
+            events::{
+                INSTRUCTION_EXECUTION_STREAM as BANKING_INSTRUCTION_EXECUTION_STREAM,
+                TRANSACTION_EVENT_STREAM as BANKING_TRANSACTION_EVENT_STREAM,
+                TRANSACTION_PROCESSING_STREAM as BANKING_TRANSACTION_PROCESSING_STREAM,
+                TransactionEventFactories as BankingTransactionEventFactories,
+            },
+            transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         banking_trace::{self, BankingTracer, TraceError},
         block_creation_loop::{BlockCreationLoop, BlockCreationLoopConfig, ReplayHighestFrozen},
@@ -29,7 +36,7 @@ use {
             SystemMonitorService, SystemMonitorStatsReportConfig, XdpNetworkConfigReport,
             verify_net_stats_access,
         },
-        tpu::{Tpu, TpuSockets},
+        tpu::{Tpu, TpuEventFactories, TpuSockets},
         tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
     },
     agave_event_system::{EventSystem, StreamConfig, stream_policy::StreamPolicy},
@@ -107,6 +114,7 @@ use {
         quic_socket::{into_quic_socket, into_quic_sockets},
     },
     solana_poh::{
+        events::TRANSACTION_EVENT_STREAM as POH_TRANSACTION_EVENT_STREAM,
         poh_controller::PohController,
         poh_recorder::PohRecorder,
         poh_service::{self, PohService},
@@ -153,6 +161,7 @@ use {
     solana_shred_version::compute_shred_version,
     solana_signer::Signer,
     solana_streamer::{
+        events::INGRESS_EVENT_STREAM,
         evicting_sender::EvictingSender,
         nonblocking::{simple_qos::SimpleQosConfig, swqos::SwQosConfig},
         quic::{QuicStreamerConfig, SimpleQosQuicStreamerConfig, SwQosQuicStreamerConfig},
@@ -160,7 +169,12 @@ use {
     },
     solana_time_utils::timestamp,
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
-    solana_turbine::{self, broadcast_stage::BroadcastStageType},
+    solana_turbine::{
+        self,
+        broadcast_stage::{
+            BroadcastStageType, events::ENTRY_EVENT_STREAM as TPU_ENTRY_EVENT_STREAM,
+        },
+    },
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     solana_validator_exit::Exit,
     solana_vote_program::vote_state::{VoteStateV4, handler::VoteStateHandler},
@@ -999,6 +1013,36 @@ impl Validator {
             publisher_slots: 256,
             subscriber_slots: 8,
         };
+        let tpu_event_factories = TpuEventFactories {
+            ingress: create_event_stream(&event_system, INGRESS_EVENT_STREAM, event_stream_config),
+            transactions: BankingTransactionEventFactories {
+                lifecycle: create_event_stream(
+                    &event_system,
+                    BANKING_TRANSACTION_EVENT_STREAM,
+                    event_stream_config,
+                ),
+                processing: create_event_stream(
+                    &event_system,
+                    BANKING_TRANSACTION_PROCESSING_STREAM,
+                    event_stream_config,
+                ),
+                instructions: create_event_stream(
+                    &event_system,
+                    BANKING_INSTRUCTION_EXECUTION_STREAM,
+                    event_stream_config,
+                ),
+            },
+            entries: create_event_stream(
+                &event_system,
+                TPU_ENTRY_EVENT_STREAM,
+                event_stream_config,
+            ),
+        };
+        let poh_transaction_events = create_event_stream(
+            &event_system,
+            POH_TRANSACTION_EVENT_STREAM,
+            event_stream_config,
+        );
         let replay_event_factories = ReplayEventFactories {
             entries: create_event_stream(&event_system, ENTRY_EVENT_STREAM, event_stream_config),
             transactions: TransactionEventFactories {
@@ -1150,7 +1194,7 @@ impl Validator {
         };
 
         let leader_schedule_cache = Arc::new(leader_schedule_cache);
-        let (poh_recorder, entry_receiver) = {
+        let (mut poh_recorder, entry_receiver) = {
             let bank = &bank_forks.read().unwrap().working_bank();
             PohRecorder::new_with_clear_signal(
                 bank.tick_height(),
@@ -1168,6 +1212,7 @@ impl Validator {
         };
         let (record_sender, record_receiver) = record_channels(transaction_status_sender.is_some());
         let transaction_recorder = TransactionRecorder::new(record_sender);
+        poh_recorder.transaction_events = Some(poh_transaction_events);
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
         let (poh_controller, poh_service_message_receiver) = PohController::new();
         let (bank_forks_controller, bank_forks_controller_receiver) =
@@ -1687,6 +1732,7 @@ impl Validator {
             optimistic_parent_receiver: optimistic_parent_receiver.clone(),
             highest_finalized: highest_finalized.clone(),
             banking_stage_sender: banking_stage_sender_for_bcl,
+            ingress_events: Some(tpu_event_factories.ingress.clone()),
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
         };
         let (block_creation_loop, reward_aggregates_sender) =
@@ -1843,6 +1889,7 @@ impl Validator {
             &cluster_info,
             &poh_recorder,
             transaction_recorder,
+            tpu_event_factories,
             entry_receiver,
             retransmit_slots_receiver,
             TpuSockets {

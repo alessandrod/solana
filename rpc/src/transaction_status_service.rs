@@ -355,7 +355,7 @@ impl TransactionStatusService {
                         TransactionHistoryPurgeInput::Leader(transactions) => blockstore
                             .purge_transaction_history_for_slot_transactions_exact(
                                 slot,
-                                transactions.as_slice(),
+                                transactions.iter().map(|tx| &tx.transaction),
                             ),
                     }
                     .map_err(|error| Error::PurgeTransactionHistory {

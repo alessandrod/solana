@@ -4,7 +4,8 @@
 use {
     self::{
         committer::Committer, consumer::Consumer, decision_maker::DecisionMaker,
-        vote_packet_receiver::VotePacketReceiver, vote_storage::VoteStorage,
+        events::TransactionEventFactories, vote_packet_receiver::VotePacketReceiver,
+        vote_storage::VoteStorage,
     },
     crate::{
         banking_stage::{
@@ -57,6 +58,7 @@ use {
     vote_worker::VoteWorker,
 };
 
+pub mod events;
 pub mod transaction_scheduler;
 
 mod alpenglow_timing;
@@ -338,6 +340,7 @@ pub struct BankingStage {
     gossip_vote_receiver: BankingPacketReceiver,
     non_vote_receiver: BankingPacketReceiver,
     transaction_recorder: TransactionRecorder,
+    transaction_events: Option<TransactionEventFactories>,
     poh_recorder: Arc<RwLock<PohRecorder>>,
     bank_forks: Arc<RwLock<BankForks>>,
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -355,6 +358,7 @@ impl BankingStage {
         block_production_method: BlockProductionMethod,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         transaction_recorder: TransactionRecorder,
+        transaction_events: Option<TransactionEventFactories>,
         non_vote_receiver: BankingPacketReceiver,
         tpu_vote_receiver: BankingPacketReceiver,
         gossip_vote_receiver: BankingPacketReceiver,
@@ -386,6 +390,7 @@ impl BankingStage {
             gossip_vote_receiver,
             non_vote_receiver,
             transaction_recorder,
+            transaction_events,
             poh_recorder,
             bank_forks,
             alpenglow_slot_clock,
@@ -564,6 +569,7 @@ impl BankingStage {
                 Consumer::new(
                     self.committer.clone(),
                     self.transaction_recorder.clone(),
+                    self.transaction_events.clone(),
                     self.log_messages_bytes_limit,
                 ),
                 finished_work_sender.clone(),
@@ -589,6 +595,10 @@ impl BankingStage {
             finished_work_receiver,
             GreedySchedulerConfig::default(),
         );
+        let transaction_events = self
+            .transaction_events
+            .as_ref()
+            .map(|factories| factories.lifecycle.clone());
         let exit = exit.clone();
         let shutdown_signal = self.banking_shutdown_signal.clone();
         threads.push(
@@ -602,6 +612,7 @@ impl BankingStage {
                         receive_and_buffer,
                         sharable_banks,
                         scheduler,
+                        transaction_events,
                         worker_metrics,
                         priority_floor,
                     );
@@ -638,6 +649,7 @@ impl BankingStage {
         let consumer = Consumer::new(
             self.committer.clone(),
             self.transaction_recorder.clone(),
+            None,
             self.log_messages_bytes_limit,
         );
         let migration_status = self.bank_forks.read().unwrap().migration_status();
@@ -732,6 +744,7 @@ mod external {
                     Consumer::new(
                         self.committer.clone(),
                         self.transaction_recorder.clone(),
+                        None,
                         self.log_messages_bytes_limit,
                     ),
                     allocator,
@@ -764,6 +777,7 @@ mod external {
                         Consumer::new(
                             self.committer.clone(),
                             self.transaction_recorder.clone(),
+                            None,
                             self.log_messages_bytes_limit,
                         ),
                         rts_alloc::Allocator::join_from_existing(&tpu_to_pack.allocator).unwrap(),
@@ -1011,6 +1025,7 @@ mod tests {
             BlockProductionMethod::CentralSchedulerGreedy,
             poh_recorder,
             transaction_recorder,
+            None,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -1074,6 +1089,7 @@ mod tests {
             BlockProductionMethod::CentralSchedulerGreedy,
             poh_recorder.clone(),
             transaction_recorder,
+            None,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -1227,6 +1243,7 @@ mod tests {
                 BlockProductionMethod::CentralSchedulerGreedy,
                 poh_recorder,
                 transaction_recorder,
+                None,
                 non_vote_receiver,
                 tpu_vote_receiver,
                 gossip_vote_receiver,
@@ -1383,6 +1400,7 @@ mod tests {
             BlockProductionMethod::CentralSchedulerGreedy,
             poh_recorder,
             transaction_recorder,
+            None,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,

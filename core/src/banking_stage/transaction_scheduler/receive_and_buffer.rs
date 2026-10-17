@@ -7,12 +7,19 @@ use {
     },
     crate::{
         banking_stage::{
-            consumer::Consumer, decision_maker::BufferedPacketsDecision, packet_bytes,
+            consumer::Consumer,
+            decision_maker::BufferedPacketsDecision,
+            events::{BankingDropReason, TransactionEvent, publish_banking_drop},
+            packet_bytes,
             scheduler_messages::MaxAge,
         },
         transaction_priority::calculate_priority_and_cost,
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
+    agave_event_system::{
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
+    },
     agave_transaction_view::{
         resolved_transaction_view::ResolvedTransactionView, sanitize::SanitizeConfig,
         transaction_data::TransactionData, transaction_version::TransactionVersion,
@@ -30,7 +37,8 @@ use {
     solana_runtime::bank::Bank,
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, sanitize_config::sanitize_config,
-        transaction_meta::TransactionMeta, transaction_with_meta::TransactionWithMeta,
+        transaction_meta::TransactionMeta, transaction_trace::TransactionTraceContext,
+        transaction_with_meta::TransactionWithMeta,
     },
     solana_sdk_ids::{ed25519_program, secp256k1_program, secp256r1_program},
     solana_secp256k1_program as secp256k1, solana_secp256r1_program as secp256r1,
@@ -88,23 +96,31 @@ pub(crate) struct PrecheckedTransaction {
     pub(crate) validated_nonce_address: Option<Pubkey>,
 }
 
-pub(crate) type PrecheckResult = Result<PrecheckedTransaction, IngressCheckError>;
+pub(crate) type PrecheckResult =
+    Result<PrecheckedTransaction, (IngressCheckError, Option<TransactionTraceContext>)>;
+
+pub(crate) struct CheckWork {
+    pub bytes: Bytes,
+    pub trace: Option<TransactionTraceContext>,
+}
 
 pub(crate) fn precheck_transaction(
-    bytes: Bytes,
+    work: CheckWork,
     root_bank: &Bank,
     working_bank: &Bank,
     filter_keys: &HashSet<Pubkey>,
-) -> PrecheckResult {
+) -> Result<PrecheckedTransaction, IngressCheckError> {
+    let CheckWork { bytes, trace } = work;
     let sanitize_config = sanitize_config();
     let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
-    let (view, deactivation_slot) = translate_to_runtime_view(
+    let (mut view, deactivation_slot) = translate_to_runtime_view(
         bytes,
         root_bank,
         transaction_account_lock_limit,
         &sanitize_config,
     )
     .map_err(IngressCheckError::PacketHandling)?;
+    view.trace = trace;
 
     if !filter_keys.is_empty()
         && view
@@ -337,25 +353,27 @@ pub(crate) trait ReceiveAndBuffer {
         &mut self,
         container: &mut Self::Container,
         decision: &BufferedPacketsDecision,
+        transaction_events: &mut Option<Publisher<TransactionEvent>>,
     ) -> Result<ReceivingStats, DisconnectedError>;
 
     fn drain_check_results(
         &mut self,
         container: &mut Self::Container,
         decision: &BufferedPacketsDecision,
+        transaction_events: &mut Option<Publisher<TransactionEvent>>,
     ) -> ReceivingStats;
 }
 
 pub(crate) struct TransactionViewReceiveAndBuffer {
     receiver: BankingPacketReceiver,
-    check_work_sender: Sender<Bytes>,
+    check_work_sender: Sender<CheckWork>,
     check_result_receiver: Receiver<PrecheckResult>,
 }
 
 impl TransactionViewReceiveAndBuffer {
     pub(crate) fn new(
         receiver: BankingPacketReceiver,
-        check_work_sender: Sender<Bytes>,
+        check_work_sender: Sender<CheckWork>,
         check_result_receiver: Receiver<PrecheckResult>,
     ) -> Self {
         Self {
@@ -374,6 +392,7 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
         &mut self,
         container: &mut Self::Container,
         decision: &BufferedPacketsDecision,
+        transaction_events: &mut Option<Publisher<TransactionEvent>>,
     ) -> Result<ReceivingStats, DisconnectedError> {
         const RECV_TIMEOUT: Duration = Duration::from_millis(10);
         const MAX_PACKET_RECEIVES: usize = 512;
@@ -399,7 +418,7 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
             match self.receiver.recv_timeout(RECV_TIMEOUT) {
                 Ok(batch) => {
                     received_message = true;
-                    self.process_packet_batch(batch, should_check, &mut stats)?;
+                    self.process_packet_batch(batch, should_check, &mut stats, transaction_events)?;
                 }
                 Err(RecvTimeoutError::Timeout) => timed_out = true,
                 Err(RecvTimeoutError::Disconnected) => {
@@ -420,7 +439,12 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
                     Ok(batch) => {
                         stats.receive_time_us += receive_start.elapsed().as_micros() as u64;
                         received_message = true;
-                        self.process_packet_batch(batch, should_check, &mut stats)?;
+                        self.process_packet_batch(
+                            batch,
+                            should_check,
+                            &mut stats,
+                            transaction_events,
+                        )?;
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -440,6 +464,7 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
         &mut self,
         container: &mut Self::Container,
         decision: &BufferedPacketsDecision,
+        transaction_events: &mut Option<Publisher<TransactionEvent>>,
     ) -> ReceivingStats {
         const MAX_CHECK_RESULTS: usize = 1024;
 
@@ -453,14 +478,29 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
             };
             if !should_buffer {
                 stats.num_dropped_without_parsing += 1;
+                let trace = match &result {
+                    Ok(transaction) => transaction.state.transaction().transaction_trace(),
+                    Err((_, trace)) => *trace,
+                };
+                publish_banking_drop(transaction_events, trace, BankingDropReason::NotLeader);
                 continue;
             }
 
             match result {
-                Ok(transaction) => {
-                    Self::admit_prechecked_transaction(transaction, container, &mut stats)
+                Ok(transaction) => Self::admit_prechecked_transaction(
+                    transaction,
+                    container,
+                    &mut stats,
+                    transaction_events,
+                ),
+                Err((err, trace)) => {
+                    stats.add_ingress_check_error(&err);
+                    publish_banking_drop(
+                        transaction_events,
+                        trace,
+                        BankingDropReason::IngressCheckFailed,
+                    );
                 }
-                Err(err) => stats.add_ingress_check_error(&err),
             }
         }
 
@@ -482,6 +522,7 @@ impl TransactionViewReceiveAndBuffer {
         batch: BankingPacketBatch,
         should_check: bool,
         stats: &mut ReceivingStats,
+        transaction_events: &mut Option<Publisher<TransactionEvent>>,
     ) -> Result<(), DisconnectedError> {
         for packet in batch.iter() {
             let Some(work) = packet_bytes(packet) else {
@@ -491,13 +532,26 @@ impl TransactionViewReceiveAndBuffer {
             stats.num_received += 1;
             if !should_check {
                 stats.num_dropped_without_parsing += 1;
+                publish_banking_drop(
+                    transaction_events,
+                    packet.trace,
+                    BankingDropReason::NotLeader,
+                );
                 continue;
             }
 
-            match self.check_work_sender.try_send(work) {
+            match self.check_work_sender.try_send(CheckWork {
+                bytes: work,
+                trace: packet.trace,
+            }) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     stats.num_dropped_on_check_work_queue_full += 1;
+                    publish_banking_drop(
+                        transaction_events,
+                        packet.trace,
+                        BankingDropReason::Capacity,
+                    );
                 }
                 Err(TrySendError::Disconnected(_)) => {
                     return Err(DisconnectedError::CheckWorker);
@@ -512,6 +566,7 @@ impl TransactionViewReceiveAndBuffer {
         prechecked_transaction: PrecheckedTransaction,
         container: &mut TransactionViewStateContainer,
         stats: &mut ReceivingStats,
+        transaction_events: &mut Option<Publisher<TransactionEvent>>,
     ) {
         let PrecheckedTransaction {
             state,
@@ -529,6 +584,11 @@ impl TransactionViewReceiveAndBuffer {
             .map(|address| (*address, priority));
         if Self::should_drop_nonce(nonce_priority, container) {
             stats.num_dropped_on_nonce_dedup += 1;
+            publish_banking_drop(
+                transaction_events,
+                state.transaction().transaction_trace(),
+                BankingDropReason::NonceConflict,
+            );
             return;
         }
 
@@ -541,13 +601,39 @@ impl TransactionViewReceiveAndBuffer {
                 container.get_nonce_transaction_priority_id(&nonce_address)
             {
                 stats.num_evicted_on_nonce_dedup += 1;
-                container.remove_by_id(existing_nonce_priority_id.id);
+                let removed = container.remove_by_id(existing_nonce_priority_id.id);
+                publish_banking_drop(
+                    transaction_events,
+                    removed.transaction().transaction_trace(),
+                    BankingDropReason::NonceConflict,
+                );
             }
             container.set_nonce_transaction_priority_id(&nonce_address, priority_id);
         }
 
-        stats.num_dropped_on_capacity +=
-            container.push_ids_into_queue(std::iter::once(priority_id));
+        if let Some(evicted) = container.queue_transaction(priority_id) {
+            stats.num_dropped_on_capacity += 1;
+            publish_banking_drop(
+                transaction_events,
+                evicted.transaction().transaction_trace(),
+                BankingDropReason::Capacity,
+            );
+        }
+        if let Some(publisher) = transaction_events
+            && publisher.is_enabled()
+            && let Some(trace) = container
+                .get_transaction(priority_id.id)
+                .and_then(|tx| tx.transaction_trace())
+        {
+            let (tid, pid) = cached_thread_and_process_id();
+            let _ = publisher.publish(&TransactionEvent::Buffered {
+                pid,
+                tid,
+                timestamp_ns: monotonic_timestamp_ns(),
+                trace_id: trace.id.0.get(),
+                attempt: trace.attempt,
+            });
+        }
         stats.num_buffered += 1;
     }
 
@@ -674,7 +760,13 @@ mod tests {
         let PrecheckedTransaction {
             state,
             validated_nonce_address,
-        } = precheck_transaction(bytes, &bank, &bank, &HashSet::new()).unwrap();
+        } = precheck_transaction(
+            CheckWork { bytes, trace: None },
+            &bank,
+            &bank,
+            &HashSet::new(),
+        )
+        .unwrap();
 
         assert_runtime_view(state.transaction());
         assert_eq!(state.transaction().data().as_ptr(), bytes_ptr);
@@ -713,7 +805,15 @@ mod tests {
             let packet = BytesPacket::from_data(transaction).unwrap();
 
             assert!(matches!(
-                precheck_transaction(packet.buffer().clone(), &bank, &bank, &HashSet::new()),
+                precheck_transaction(
+                    CheckWork {
+                        bytes: packet.buffer().clone(),
+                        trace: None,
+                    },
+                    &bank,
+                    &bank,
+                    &HashSet::new(),
+                ),
                 Err(IngressCheckError::PacketHandling(
                     PacketHandlingError::Sanitization
                 ))
@@ -818,12 +918,18 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut stats = ReceivingStats::default();
         loop {
-            stats.accumulate(
-                receive_and_buffer.drain_check_results(container, &BufferedPacketsDecision::Hold),
-            );
+            stats.accumulate(receive_and_buffer.drain_check_results(
+                container,
+                &BufferedPacketsDecision::Hold,
+                &mut None,
+            ));
             stats.accumulate(
                 receive_and_buffer
-                    .receive_and_buffer_packets(container, &BufferedPacketsDecision::Hold)
+                    .receive_and_buffer_packets(
+                        container,
+                        &BufferedPacketsDecision::Hold,
+                        &mut None,
+                    )
                     .unwrap(),
             );
 
@@ -849,8 +955,11 @@ mod tests {
             setup_transaction_view_receive_and_buffer(receiver, bank_forks);
 
         drop(sender); // disconnect channel
-        let r = receive_and_buffer
-            .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold);
+        let r = receive_and_buffer.receive_and_buffer_packets(
+            &mut container,
+            &BufferedPacketsDecision::Hold,
+            &mut None,
+        );
         assert!(r.is_err());
     }
 
@@ -861,7 +970,12 @@ mod tests {
             .send(to_single_banking_packet_batch(&Transaction::default()))
             .unwrap();
         let (work_sender, _work_receiver) = bounded(1);
-        work_sender.send(Bytes::new()).unwrap();
+        work_sender
+            .send(CheckWork {
+                bytes: Bytes::new(),
+                trace: None,
+            })
+            .unwrap();
         let (_result_sender, result_receiver) = bounded(1);
         let mut receive_and_buffer = TransactionViewReceiveAndBuffer {
             receiver,
@@ -871,7 +985,7 @@ mod tests {
         let mut container = TransactionViewStateContainer::with_capacity(1);
 
         let stats = receive_and_buffer
-            .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold)
+            .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold, &mut None)
             .unwrap();
 
         assert_eq!(stats.num_received, 0);
@@ -897,7 +1011,7 @@ mod tests {
         let mut container = TransactionViewStateContainer::with_capacity(1);
 
         let first = receive_and_buffer
-            .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold)
+            .receive_and_buffer_packets(&mut container, &BufferedPacketsDecision::Hold, &mut None)
             .unwrap();
         assert_eq!(first.num_received, 2);
         assert_eq!(first.num_dropped_on_check_work_queue_full, 1);
@@ -943,6 +1057,7 @@ mod tests {
             .receive_and_buffer_packets(
                 &mut container,
                 &BufferedPacketsDecision::Forward, // no packets should be held
+                &mut None,
             )
             .unwrap();
 
