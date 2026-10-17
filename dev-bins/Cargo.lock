@@ -7510,6 +7510,7 @@ dependencies = [
  "solana-message",
  "solana-packet",
  "solana-pubkey 4.4.0",
+ "solana-runtime-transaction",
  "solana-sdk-ids",
  "solana-short-vec",
  "solana-signature",
@@ -7529,6 +7530,7 @@ name = "solana-poh"
 version = "4.5.0-alpha.4"
 dependencies = [
  "agave-cpu-utils",
+ "agave-event-system",
  "agave-votor-messages",
  "arc-swap",
  "crossbeam-channel",
@@ -7544,6 +7546,7 @@ dependencies = [
  "solana-poh-config",
  "solana-pubkey 4.4.0",
  "solana-runtime",
+ "solana-runtime-transaction",
  "solana-transaction",
  "thiserror 2.0.21",
 ]
@@ -8550,6 +8553,8 @@ dependencies = [
 name = "solana-streamer"
 version = "4.5.0-alpha.4"
 dependencies = [
+ "agave-event-system",
+ "agave-transaction-view",
  "agave-wake-channel",
  "bytes",
  "crossbeam-channel",
@@ -8572,6 +8577,7 @@ dependencies = [
  "solana-packet",
  "solana-perf",
  "solana-pubkey 4.4.0",
+ "solana-runtime-transaction",
  "solana-signer",
  "solana-time-utils",
  "solana-tls-utils",
@@ -9057,6 +9063,7 @@ dependencies = [
 name = "solana-turbine"
 version = "4.5.0-alpha.4"
 dependencies = [
+ "agave-event-system",
  "agave-votor",
  "agave-votor-messages",
  "agave-wake-channel",

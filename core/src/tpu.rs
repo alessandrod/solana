@@ -6,7 +6,7 @@ use {
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
         banking_channels::Channels,
         banking_stage::{
-            BankingControlMsg, BankingStage, BankingStageHandle,
+            BankingControlMsg, BankingStage, BankingStageHandle, events::TransactionEventFactories,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         cluster_info_vote_listener::{
@@ -25,6 +25,7 @@ use {
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
     agave_bls_sigverify::pubkeys::VerifiedVotorSlotsMessage,
+    agave_event_system::PublisherFactory,
     agave_jemalloc::group::ArenaGroup,
     agave_votor::{event::VotorEventSender, slot_clock::SharedAlpenglowSlotClock},
     agave_xdp::transmitter::XdpSender,
@@ -50,16 +51,18 @@ use {
         vote_sender_types::{ReplayVoteReceiver, ReplayVoteSender},
     },
     solana_streamer::{
+        events::IngressEvent,
         evicting_sender::EvictingSender,
         quic::{
             SimpleQosQuicStreamerConfig, SpawnServerResult, SwQosQuicStreamerConfig,
             spawn_simple_qos_server, spawn_stake_weighted_qos_server,
         },
         streamer::StakedNodes,
+        transaction_trace::TransactionTracer,
     },
     solana_turbine::{
         XdpSender as TurbineXdpSender,
-        broadcast_stage::{BroadcastStage, BroadcastStageType},
+        broadcast_stage::{BroadcastStage, BroadcastStageType, events::EntryShredded},
     },
     std::{
         collections::{HashMap, HashSet},
@@ -81,6 +84,12 @@ pub struct TpuSockets {
     pub vote_quic: Vec<UdpSocket>,
     /// Client-side socket for the forwarding votes.
     pub vote_forwarding_client: UdpSocket,
+}
+
+pub struct TpuEventFactories {
+    pub ingress: PublisherFactory<IngressEvent>,
+    pub transactions: TransactionEventFactories,
+    pub entries: PublisherFactory<EntryShredded>,
 }
 
 // Conservatively allow 20 TPS per validator.
@@ -119,6 +128,7 @@ impl Tpu {
         cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         transaction_recorder: TransactionRecorder,
+        event_factories: TpuEventFactories,
         entry_receiver: Receiver<WorkingBankMessage>,
         retransmit_slots_receiver: Receiver<Slot>,
         sockets: TpuSockets,
@@ -147,8 +157,8 @@ impl Tpu {
         staked_nodes: &Arc<RwLock<StakedNodes>>,
         shared_staked_nodes_overrides: Arc<RwLock<HashMap<Pubkey, u64>>>,
         banking_channels: Channels,
-        tpu_quic_server_config: SwQosQuicStreamerConfig,
-        tpu_fwd_quic_server_config: SwQosQuicStreamerConfig,
+        mut tpu_quic_server_config: SwQosQuicStreamerConfig,
+        mut tpu_fwd_quic_server_config: SwQosQuicStreamerConfig,
         vote_quic_server_config: SimpleQosQuicStreamerConfig,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         tpu_sigverify_threads: NonZeroUsize,
@@ -175,6 +185,13 @@ impl Tpu {
         } = sockets;
 
         let (packet_sender, packet_receiver) = agave_wake_channel::bounded(TPU_CHANNEL_SIZE);
+        let transaction_tracer = Arc::new(TransactionTracer::new(event_factories.ingress.clone()));
+        tpu_quic_server_config
+            .quic_streamer_config
+            .transaction_tracer = Some(transaction_tracer.clone());
+        tpu_fwd_quic_server_config
+            .quic_streamer_config
+            .transaction_tracer = Some(transaction_tracer);
         let (vote_packet_sender, vote_packet_receiver) = bounded(0); // TPU votes are not ingested
         let evicting_vote_sender =
             EvictingSender::new(vote_packet_sender.clone(), vote_packet_receiver.clone());
@@ -188,6 +205,7 @@ impl Tpu {
             forwarded_packet_receiver,
             poh_recorder,
             None, // coalesce
+            Some(event_factories.ingress.clone()),
         );
 
         let staked_nodes_updater_service = StakedNodesUpdaterService::new(
@@ -288,6 +306,7 @@ impl Tpu {
             enable_block_production_forwarding,
             bank_forks.read().unwrap().sharable_banks(),
             Some(scheduler_priority_floor.clone()),
+            Some(event_factories.ingress),
         );
 
         let cluster_info_vote_listener = ClusterInfoVoteListener::new(
@@ -307,6 +326,7 @@ impl Tpu {
             block_production_method,
             poh_recorder.clone(),
             transaction_recorder,
+            Some(event_factories.transactions),
             non_vote_receiver,
             // Votes are not ingested. A disconnected receiver would shut down banking stage.
             crossbeam_channel::never(),
@@ -372,6 +392,7 @@ impl Tpu {
             shred_version,
             turbine_xdp_sender,
             votor_event_sender,
+            Some(event_factories.entries),
         );
 
         let mut key_notifiers = key_notifiers.write().unwrap();

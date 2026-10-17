@@ -2,11 +2,13 @@
 
 use {
     crate::result::{Error, Result},
+    agave_event_system::{PublisherFactory, publisher::Publisher},
     crossbeam_channel::{RecvTimeoutError, TrySendError, unbounded},
     solana_clock::{DEFAULT_TICKS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET},
     solana_perf::packet::{BytesPacket, PacketBatch, PacketFlags},
     solana_poh::poh_recorder::PohRecorder,
     solana_streamer::{
+        events::{IngressDropReason, IngressEvent, publish_ingress_drops},
         evicting_sender::EvictingSender,
         streamer::{self, ChannelSend, PacketBatchReceiver, StreamerReceiveStats},
     },
@@ -89,6 +91,7 @@ impl FetchStage {
                 forward_receiver,
                 poh_recorder,
                 coalesce,
+                None,
             ),
             receiver,
             vote_receiver,
@@ -96,6 +99,7 @@ impl FetchStage {
     }
 
     /// The stage only needs [`ChannelSend`] from its packet sinks.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_sender(
         tpu_vote_sockets: Vec<UdpSocket>,
         exit: Arc<AtomicBool>,
@@ -104,6 +108,7 @@ impl FetchStage {
         forward_receiver: PacketBatchReceiver,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        ingress_events: Option<PublisherFactory<IngressEvent>>,
     ) -> Self {
         let tpu_vote_sockets = tpu_vote_sockets.into_iter().map(Arc::new).collect();
         Self::new_multi_socket(
@@ -114,6 +119,7 @@ impl FetchStage {
             forward_receiver,
             poh_recorder,
             coalesce,
+            ingress_events,
         )
     }
 
@@ -122,6 +128,7 @@ impl FetchStage {
         sendr: &impl ChannelSend<PacketBatch>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         stats: &mut ForwardingStats,
+        ingress_events: &mut Option<Publisher<IngressEvent>>,
     ) -> Result<()> {
         let mark_forwarded = |packet: &mut BytesPacket| {
             packet.meta_mut().flags |= PacketFlags::FORWARDED;
@@ -152,19 +159,30 @@ impl FetchStage {
                     Ok(()) => {
                         stats.num_packets_sent += packets_in_batch;
                     }
-                    Err(TrySendError::Full(_)) => {
+                    Err(TrySendError::Full(batch)) => {
                         stats.num_packets_dropped += packets_in_batch;
+                        publish_ingress_drops(
+                            ingress_events,
+                            batch.iter(),
+                            IngressDropReason::Capacity,
+                        );
                     }
                     Err(TrySendError::Disconnected(_)) => return Err(Error::Send),
                 };
             }
         } else {
             stats.num_packets_discarded += num_packets;
+            publish_ingress_drops(
+                ingress_events,
+                packet_batches.iter().flat_map(|batch| batch.iter()),
+                IngressDropReason::NotLeader,
+            );
         }
 
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_multi_socket(
         tpu_vote_sockets: Vec<Arc<UdpSocket>>,
         exit: Arc<AtomicBool>,
@@ -173,6 +191,7 @@ impl FetchStage {
         forward_receiver: PacketBatchReceiver,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        ingress_events: Option<PublisherFactory<IngressEvent>>,
     ) -> Self {
         let tpu_vote_stats = Arc::new(StreamerReceiveStats::new("tpu_vote_receiver"));
         let tpu_vote_threads: Vec<_> = tpu_vote_sockets
@@ -198,6 +217,8 @@ impl FetchStage {
             .name("solFetchStgFwRx".to_string())
             .spawn(move || {
                 let mut stats = ForwardingStats::new();
+                let mut ingress_events =
+                    ingress_events.and_then(|factory| factory.try_create_publisher());
 
                 loop {
                     if let Err(e) = Self::handle_forwarded_packets(
@@ -205,6 +226,7 @@ impl FetchStage {
                         &sender,
                         &poh_recorder,
                         &mut stats,
+                        &mut ingress_events,
                     ) {
                         match e {
                             Error::RecvTimeout(RecvTimeoutError::Disconnected) => break,

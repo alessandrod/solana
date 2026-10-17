@@ -24,6 +24,8 @@ agave-unstable-api = []
 dev-context-only-utils = []
 
 [dependencies]
+agave-event-system = { workspace = true }
+agave-transaction-view = { workspace = true }
 agave-wake-channel = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -46,6 +48,7 @@ solana-net-utils = { workspace = true }
 solana-packet = { workspace = true }
 solana-perf = { workspace = true }
 solana-pubkey = { workspace = true }
+solana-runtime-transaction = { workspace = true }
 solana-signer = { workspace = true }
 solana-time-utils = { workspace = true }
 solana-tls-utils = { workspace = true }

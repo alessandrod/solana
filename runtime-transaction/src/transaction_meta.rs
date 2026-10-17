@@ -12,6 +12,7 @@
 //! RuntimeTransaction types, not the TransactionMeta itself.
 //!
 use {
+    crate::transaction_trace::TransactionTraceContext,
     agave_feature_set::FeatureSet,
     agave_transaction_view::{
         message_view::SanitizedMessageView, transaction_config_view::TransactionConfigView,
@@ -33,6 +34,12 @@ use {
 };
 
 pub trait TransactionMeta {
+    fn transaction_trace(&self) -> Option<TransactionTraceContext> {
+        None
+    }
+    fn transaction_trace_mut(&mut self) -> Option<&mut TransactionTraceContext> {
+        None
+    }
     fn message_hash(&self) -> &Hash;
     fn is_simple_vote_transaction(&self) -> bool;
     fn signature_details(&self) -> &TransactionSignatureDetails;

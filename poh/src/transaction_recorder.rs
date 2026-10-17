@@ -7,7 +7,7 @@ use {
     solana_hash::Hash,
     solana_measure::measure_us,
     solana_runtime::bank::BankId,
-    solana_transaction::versioned::VersionedTransaction,
+    solana_runtime_transaction::recording_transaction::RecordingTransaction,
     std::num::Saturating,
 };
 
@@ -52,13 +52,15 @@ impl TransactionRecorder {
     pub fn record_transactions(
         &self,
         bank_id: BankId,
-        transactions: Vec<VersionedTransaction>,
+        transactions: Vec<RecordingTransaction>,
     ) -> RecordTransactionsSummary {
         let mut record_transactions_timings = RecordTransactionsTimings::default();
         let mut starting_transaction_index = None;
 
         if !transactions.is_empty() {
-            let (hash, hash_us) = measure_us!(hash_transactions(&transactions));
+            let (hash, hash_us) = measure_us!(hash_transactions(
+                transactions.iter().map(|tx| &tx.transaction)
+            ));
             record_transactions_timings.hash_us = Saturating(hash_us);
 
             let (res, poh_record_us) = measure_us!(self.record(bank_id, hash, transactions));
@@ -104,7 +106,7 @@ impl TransactionRecorder {
         &self,
         bank_id: BankId,
         mixin: Hash,
-        transactions: Vec<VersionedTransaction>,
+        transactions: Vec<RecordingTransaction>,
     ) -> Result<Option<usize>, RecordSenderError> {
         self.record_sender
             .try_send(Record::new(mixin, transactions, bank_id))

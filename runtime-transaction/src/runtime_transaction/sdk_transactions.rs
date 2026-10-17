@@ -75,6 +75,7 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
 
         Ok(Self {
             transaction: sanitized_versioned_tx,
+            trace: None,
             meta: CachedTransactionMeta {
                 message_hash,
                 is_simple_vote_transaction: is_simple_vote_tx,
@@ -145,6 +146,7 @@ impl RuntimeTransaction<SanitizedTransaction> {
         let tx = Self {
             transaction: sanitized_transaction,
             meta: statically_loaded_runtime_tx.meta,
+            trace: statically_loaded_runtime_tx.trace,
         };
 
         Ok(tx)

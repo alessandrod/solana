@@ -116,9 +116,19 @@ pub fn ed25519_verify(
 }
 
 pub fn ed25519_verify_serial(batch: &mut PacketBatch, reject_non_vote: bool) {
+    ed25519_verify_serial_with_on_discard(batch, reject_non_vote, |_| {});
+}
+
+/// Calls `on_discard` for each packet newly marked discarded during verification.
+pub fn ed25519_verify_serial_with_on_discard(
+    batch: &mut PacketBatch,
+    reject_non_vote: bool,
+    mut on_discard: impl FnMut(&BytesPacket),
+) {
     for packet in batch.iter_mut() {
         if !packet.meta().discard() && !verify_packet(packet, reject_non_vote) {
             packet.meta_mut().set_discard(true);
+            on_discard(packet);
         }
     }
 }

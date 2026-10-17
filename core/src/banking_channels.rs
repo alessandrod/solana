@@ -63,13 +63,32 @@ pub struct BankingPacketSender {
 
 impl BankingPacketSender {
     /// Send a batch on the channel. This may evict an existing batch to make
-    /// room; in that case `Ok(n)` is returned where `n` is the number of
-    /// evicted packets. On channel disconnect returns `Err(SendError)`.
+    /// room; `Ok(n)` reports the total number of dropped packets.
+    /// On disconnect returns `Err(SendError)`.
     pub fn send(&self, batch: BankingPacketBatch) -> Result<usize, SendError<BankingPacketBatch>> {
-        match self.sender.try_send(batch) {
-            Ok(()) => Ok(0),
-            Err(TrySendError::Full(b)) => Ok(b.len()),
-            Err(TrySendError::Disconnected(b)) => Err(SendError(b)),
+        self.send_with_on_drop(batch, |_| {})
+    }
+
+    /// Sends a batch, calling `on_drop` for each batch dropped to make room.
+    /// Returns the total number of dropped packets, or `Err(SendError)` on disconnect.
+    pub fn send_with_on_drop(
+        &self,
+        batch: BankingPacketBatch,
+        mut on_drop: impl FnMut(&BankingPacketBatch),
+    ) -> Result<usize, SendError<BankingPacketBatch>> {
+        let mut dropped_packets = 0;
+        let result = self.sender.try_send_with_eviction(batch, |older| {
+            dropped_packets += older.len();
+            on_drop(&older);
+        });
+        match result {
+            Ok(()) => Ok(dropped_packets),
+            Err(TrySendError::Full(batch)) => {
+                dropped_packets += batch.len();
+                on_drop(&batch);
+                Ok(dropped_packets)
+            }
+            Err(TrySendError::Disconnected(batch)) => Err(SendError(batch)),
         }
     }
 
@@ -96,7 +115,16 @@ mod tests {
         let second = to_banking_packet_batch(&vec![test_tx(); 2]);
 
         assert_eq!(sender.send(first).unwrap(), 0);
-        assert_eq!(sender.send(BankingPacketBatch::clone(&second)).unwrap(), 4);
+        let mut dropped_packets = 0;
+        assert_eq!(
+            sender
+                .send_with_on_drop(BankingPacketBatch::clone(&second), |batch| {
+                    dropped_packets += batch.len();
+                })
+                .unwrap(),
+            4
+        );
+        assert_eq!(dropped_packets, 4);
         assert_eq!(sender.len(), 1);
         assert_eq!(receiver.try_recv().unwrap().len(), second.len());
         assert!(sender.is_empty());

@@ -17,7 +17,10 @@ use {
     },
     solana_measure::measure::Measure,
     solana_program_runtime::invoke_context::InstructionExecutionDetails,
-    solana_runtime_transaction::transaction_with_meta::{TransactionWithMeta, writable_accounts},
+    solana_runtime_transaction::{
+        recording_transaction::RecordingTransaction,
+        transaction_with_meta::{TransactionWithMeta, writable_accounts},
+    },
     solana_signature::Signature,
     solana_svm::{
         events::TransactionProcessingDetails,
@@ -28,7 +31,7 @@ use {
     },
     solana_svm_timings::{ExecuteTimingType, ExecuteTimings},
     solana_svm_transaction::{svm_message::SVMMessage, svm_transaction::SVMTransaction},
-    solana_transaction::{sanitized::SanitizedTransaction, versioned::VersionedTransaction},
+    solana_transaction::sanitized::SanitizedTransaction,
     solana_transaction_error::TransactionResult,
     solana_transaction_status::token_balances::TransactionTokenBalancesSet,
     std::{borrow::Cow, sync::Arc, time::Instant},
@@ -68,7 +71,7 @@ pub enum TransactionStatusMessage {
 pub enum TransactionHistoryPurgeInput {
     ReplayStage,
     SwitchBank,
-    Leader(Arc<Vec<VersionedTransaction>>),
+    Leader(Arc<Vec<RecordingTransaction>>),
 }
 
 /// The validator path that requested transaction-history cleanup for a slot.

@@ -9,11 +9,13 @@ use {
         sigverify::{SigVerifyWorkerPool, SigVerifyWorkerState, SigVerifyWorkerStats},
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, SchedulerPriorityFloor},
+    agave_event_system::PublisherFactory,
     agave_wake_channel::Receiver,
     core::time::Duration,
     crossbeam_channel::Sender,
     solana_perf::{deduper::Deduper, packet::PacketBatch},
     solana_runtime::bank_forks::SharableBanks,
+    solana_streamer::events::IngressEvent,
     std::{
         num::NonZeroUsize,
         sync::{
@@ -132,6 +134,7 @@ impl SigVerifierStats {
 
 impl SigVerifyStage {
     /// Joining or dropping the stage blocks until all senders of `packet_receiver` are dropped.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         packet_receiver: Receiver<PacketBatch>,
         non_vote_sender: BankingPacketSender,
@@ -140,6 +143,7 @@ impl SigVerifyStage {
         forward_non_votes: bool,
         sharable_banks: SharableBanks,
         scheduler_priority_floor: Option<Arc<SchedulerPriorityFloor>>,
+        ingress_events: Option<PublisherFactory<IngressEvent>>,
     ) -> Self {
         let non_vote_stats = SigVerifierStats::default();
         let exit = Arc::new(AtomicBool::new(false));
@@ -172,6 +176,7 @@ impl SigVerifyStage {
                 },
                 scheduler_priority_floor,
             ),
+            ingress_events,
         );
         let servicer_thread_hdl = Self::servicer(
             exit.clone(),
@@ -311,6 +316,7 @@ mod tests {
             false,
             sharable_banks,
             None,
+            None,
         );
 
         let now = Instant::now();
@@ -370,6 +376,7 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
             false,
             sharable_banks,
+            None,
             None,
         );
 

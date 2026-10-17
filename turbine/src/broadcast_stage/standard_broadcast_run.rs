@@ -3,9 +3,15 @@
 use {
     super::{
         broadcast_utils::{self, BroadcastItem, ReceiveResults},
+        events::EntryShredded,
         *,
     },
     crate::cluster_nodes::ClusterNodesCache,
+    agave_event_system::{
+        PublisherFactory,
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
+    },
     agave_votor::event::VotorEventSender,
     agave_votor_messages::{
         consensus_message::{Block, BlockId},
@@ -24,8 +30,12 @@ use {
     solana_runtime::bank::Bank,
     solana_sha256_hasher::hashv,
     solana_time_utils::AtomicInterval,
-    std::{borrow::Cow, collections::VecDeque, sync::RwLock},
+    std::{borrow::Cow, cell::RefCell, collections::VecDeque, sync::RwLock},
 };
+
+thread_local! {
+    static ENTRY_EVENTS: RefCell<Option<Publisher<EntryShredded>>> = const { RefCell::new(None) };
+}
 
 // Expect blacklist events to be extremely rare, so we can tightly bound the
 // data structure. Need to be able to hold a full leader span, and we'll go
@@ -34,6 +44,7 @@ const MAX_BROADCAST_BLACKLIST_SIZE: usize = 16;
 
 #[derive(Clone)]
 pub struct StandardBroadcastRun {
+    entry_events: Option<PublisherFactory<EntryShredded>>,
     slot: Slot,
     // Parent encoded in shred headers. This must remain stable for the slot
     // because it is used to derive PARENT_OFFSET.
@@ -77,12 +88,14 @@ impl StandardBroadcastRun {
         migration_status: Arc<MigrationStatus>,
         votor_event_sender: VotorEventSender,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
+        entry_events: Option<PublisherFactory<EntryShredded>>,
     ) -> Self {
         let cluster_nodes_cache = Arc::new(ClusterNodesCache::<BroadcastStage>::new(
             CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
             CLUSTER_NODES_CACHE_TTL,
         ));
         Self {
+            entry_events,
             slot: Slot::MAX,
             parent: Slot::MAX,
             parent_block_id: BlockId::default(),
@@ -438,6 +451,8 @@ impl StandardBroadcastRun {
         };
 
         if let Some(component) = component {
+            let data_shred_start = self.next_shred_index;
+            let code_shred_start = self.next_code_index;
             shreds.extend(
                 self.component_to_shreds(
                     keypair,
@@ -448,6 +463,30 @@ impl StandardBroadcastRun {
                 )
                 .unwrap(),
             );
+            if let BlockComponent::EntryBatch(entries) = &component {
+                ENTRY_EVENTS.with_borrow_mut(|publisher| {
+                    if let Some(publisher) = publisher.as_mut()
+                        && publisher.is_enabled()
+                    {
+                        let (tid, pid) = cached_thread_and_process_id();
+                        let timestamp_ns = monotonic_timestamp_ns();
+                        for entry in entries {
+                            let _ = publisher.publish(&EntryShredded {
+                                pid,
+                                tid,
+                                timestamp_ns,
+                                bank_id: bank.bank_id().into(),
+                                slot: bank.slot(),
+                                entry_hash: entry.hash.to_bytes(),
+                                data_shred_start,
+                                data_shred_end: self.next_shred_index,
+                                code_shred_start,
+                                code_shred_end: self.next_code_index,
+                            });
+                        }
+                    }
+                });
+            }
             self.maybe_update_parent_from_component(&component);
         }
 
@@ -646,6 +685,14 @@ impl StandardBroadcastRun {
 }
 
 impl BroadcastRun for StandardBroadcastRun {
+    fn initialize_thread(&self) {
+        ENTRY_EVENTS.set(
+            self.entry_events
+                .as_ref()
+                .and_then(|factory| factory.try_create_publisher()),
+        );
+    }
+
     fn run<'db>(
         &mut self,
         keypair: &Keypair,
@@ -822,6 +869,7 @@ mod test {
             Arc::new(MigrationStatus::post_migration_status()),
             votor_event_sender,
             test_leader_schedule_cache(&parent_bank),
+            None,
         );
         let (blockstore_sender, blockstore_receiver) = bounded(1024);
         let (socket_sender, socket_receiver) = bounded(1024);
@@ -960,6 +1008,7 @@ mod test {
             Arc::new(MigrationStatus::default()),
             votor_event_sender,
             test_leader_schedule_cache(&bank),
+            None,
         );
 
         standard_broadcast_run
@@ -991,6 +1040,7 @@ mod test {
             Arc::new(MigrationStatus::default()),
             votor_event_sender,
             test_leader_schedule_cache(&bank),
+            None,
         );
         assert!(run.completed);
 
@@ -1047,6 +1097,7 @@ mod test {
             Arc::new(migration_status),
             votor_event_sender,
             test_leader_schedule_cache(&bank0),
+            None,
         );
         standard_broadcast_run
             .test_process_receive_results(
@@ -1200,6 +1251,7 @@ mod test {
             Arc::new(MigrationStatus::default()),
             votor_event_sender,
             test_leader_schedule_cache(&bank),
+            None,
         );
         let mut process_ticks = |num_ticks| {
             let ticks = create_ticks(num_ticks, 0, genesis_config.hash());
@@ -1275,6 +1327,7 @@ mod test {
             Arc::new(MigrationStatus::default()),
             votor_event_sender,
             test_leader_schedule_cache(&bank),
+            None,
         );
         standard_broadcast_run
             .test_process_receive_results(
@@ -1321,6 +1374,7 @@ mod test {
             Arc::new(MigrationStatus::default()),
             votor_event_sender,
             test_leader_schedule_cache(&bank1),
+            None,
         );
         let (bsend, brecv) = bounded(1024);
         let (ssend, srecv) = bounded(1024);
@@ -1441,6 +1495,7 @@ mod test {
             Arc::new(MigrationStatus::default()),
             votor_event_sender,
             test_leader_schedule_cache(&bank),
+            None,
         );
         bs.slot = 1;
         bs.parent = 0;
@@ -1478,6 +1533,7 @@ mod test {
             Arc::new(MigrationStatus::post_migration_status()),
             votor_event_sender,
             test_leader_schedule_cache(&bank),
+            None,
         );
         bs.slot = 12;
         bs.parent = 10;
