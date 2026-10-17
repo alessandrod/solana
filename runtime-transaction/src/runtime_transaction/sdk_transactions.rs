@@ -62,6 +62,7 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
         Ok(Self {
             implicit_read_locks: Vec::new(),
             transaction: sanitized_versioned_tx,
+            trace: None,
             meta: CachedTransactionMeta {
                 message_hash,
                 is_simple_vote_transaction: is_simple_vote_tx,
@@ -130,6 +131,7 @@ impl RuntimeTransaction<SanitizedTransaction> {
             implicit_read_locks: statically_loaded_runtime_tx.implicit_read_locks,
             transaction: sanitized_transaction,
             meta: statically_loaded_runtime_tx.meta,
+            trace: statically_loaded_runtime_tx.trace,
         })
     }
 }

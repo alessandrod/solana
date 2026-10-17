@@ -54,6 +54,7 @@ impl<D: TransactionData> RuntimeTransaction<SanitizedTransactionView<D>> {
                 implicit_read_locks: Vec::new(),
                 transaction,
                 meta,
+                trace: None,
             }
         })
     }
@@ -70,6 +71,7 @@ impl<'a, D: TransactionData> RuntimeTransaction<&'a SanitizedTransactionView<D>>
                 implicit_read_locks: Vec::new(),
                 transaction,
                 meta,
+                trace: None,
             }
         })
     }
@@ -143,6 +145,7 @@ impl<D: TransactionData> RuntimeTransaction<ResolvedTransactionView<D>> {
             transaction,
             meta,
             implicit_read_locks,
+            trace,
         } = statically_loaded_runtime_tx;
         // transaction-view does not distinguish between different types of errors here.
         // return generic sanitize failure error here.
@@ -155,6 +158,7 @@ impl<D: TransactionData> RuntimeTransaction<ResolvedTransactionView<D>> {
             implicit_read_locks,
             transaction,
             meta,
+            trace,
         })
     }
 }

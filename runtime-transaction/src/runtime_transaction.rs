@@ -12,6 +12,7 @@
 use {
     crate::{
         transaction_meta::{CachedTransactionMeta, TransactionConfiguration, TransactionMeta},
+        transaction_trace::TransactionTraceContext,
         transaction_with_meta::implicit_read_locks,
     },
     agave_feature_set::FeatureSet,
@@ -45,6 +46,7 @@ pub struct RuntimeTransaction<T> {
     // during message state transition
     meta: CachedTransactionMeta,
     implicit_read_locks: Vec<Pubkey>,
+    pub trace: Option<TransactionTraceContext>,
 }
 
 impl<T> RuntimeTransaction<T> {
@@ -63,6 +65,14 @@ impl<T: SVMMessage> RuntimeTransaction<T> {
 impl<T> TransactionMeta for RuntimeTransaction<T> {
     fn implicit_read_locks(&self) -> &[Pubkey] {
         &self.implicit_read_locks
+    }
+
+    fn transaction_trace(&self) -> Option<TransactionTraceContext> {
+        self.trace
+    }
+
+    fn transaction_trace_mut(&mut self) -> Option<&mut TransactionTraceContext> {
+        self.trace.as_mut()
     }
 
     fn message_hash(&self) -> &Hash {

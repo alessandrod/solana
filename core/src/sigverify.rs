@@ -8,14 +8,18 @@ use {
         transaction_priority::calculate_priority_from_bytes,
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, SchedulerPriorityFloor},
+    agave_event_system::{PublisherFactory, publisher::Publisher},
     crossbeam_channel::{Receiver, Sender, TrySendError, bounded},
     solana_measure::measure_us,
     solana_perf::{
         deduper::{self, Deduper},
-        packet::PacketBatch,
+        packet::{BytesPacket, PacketBatch},
         sigverify::{self},
     },
     solana_runtime::{bank::Bank, bank_forks::SharableBanks},
+    solana_streamer::events::{
+        IngressDropReason, IngressEvent, publish_ingress_drop, publish_ingress_drops,
+    },
     solana_transaction::Transaction,
     std::{
         num::NonZeroUsize,
@@ -131,12 +135,14 @@ impl GossipSigVerifier {
 const SIGVERIFY_GOSSIP_VOTE_WORK_CHANNEL_SIZE: usize = 50_000;
 
 pub(crate) struct SigVerifyWorkerSenders {
+    pub(crate) ingress_events: Option<PublisherFactory<IngressEvent>>,
     pub(crate) gossip_verified_vote_sender: Sender<GossipVerifiedVoteBatch>,
     pub(crate) forward_stage_sender: Sender<(BankingPacketBatch, bool)>,
 }
 
 #[derive(Clone)]
 struct WorkerPoolChannels {
+    ingress_events: Option<PublisherFactory<IngressEvent>>,
     non_vote_receiver: Receiver<PacketBatch>,
     tpu_vote_receiver: Receiver<PacketBatch>,
     gossip_receiver: Receiver<GossipVerifyTask>,
@@ -177,6 +183,7 @@ impl SigVerifyWorkerPool {
     ) -> Self {
         let (gossip_sender, gossip_receiver) = bounded(SIGVERIFY_GOSSIP_VOTE_WORK_CHANNEL_SIZE);
         let channels = WorkerPoolChannels {
+            ingress_events: senders.ingress_events,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_receiver,
@@ -212,15 +219,23 @@ impl SigVerifyWorkerPool {
     }
 
     fn worker(exit: Arc<AtomicBool>, channels: WorkerPoolChannels, forward_non_votes: bool) {
+        let mut ingress_events = channels
+            .ingress_events
+            .as_ref()
+            .and_then(|factory| factory.try_create_publisher());
         while !exit.load(Ordering::Relaxed) {
-            if !Self::worker_iteration(&channels, forward_non_votes) {
+            if !Self::worker_iteration(&channels, forward_non_votes, &mut ingress_events) {
                 break;
             }
         }
     }
 
     /// Returns false if some channel connection is disconnected.
-    fn worker_iteration(channels: &WorkerPoolChannels, forward_non_votes: bool) -> bool {
+    fn worker_iteration(
+        channels: &WorkerPoolChannels,
+        forward_non_votes: bool,
+        ingress_events: &mut Option<Publisher<IngressEvent>>,
+    ) -> bool {
         crossbeam_channel::select! {
             recv(&channels.non_vote_receiver) -> maybe_work => {
                 match maybe_work {
@@ -232,6 +247,7 @@ impl SigVerifyWorkerPool {
                         false,
                         &channels.sharable_banks,
                         &channels.non_vote_state,
+                        ingress_events,
                     ),
                     Err(_) => false,
                 }
@@ -246,6 +262,7 @@ impl SigVerifyWorkerPool {
                         true,
                         &channels.sharable_banks,
                         &channels.tpu_vote_state,
+                        ingress_events,
                     ),
                     Err(_) => false,
                 }
@@ -271,6 +288,7 @@ impl SigVerifyWorkerPool {
         is_tpu_vote: bool,
         sharable_banks: &SharableBanks,
         state: &SigVerifyWorkerState,
+        ingress_events: &mut Option<Publisher<IngressEvent>>,
     ) -> bool {
         let batch_len = batch.len();
         state.stats.total_batches.fetch_add(1, Ordering::Relaxed);
@@ -280,9 +298,14 @@ impl SigVerifyWorkerPool {
             .fetch_add(batch_len, Ordering::Relaxed);
 
         let (discard_or_dedup_fail, dedup_time_us) =
-            measure_us!(deduper::dedup_packets_and_count_discards(
+            measure_us!(deduper::dedup_packets_and_count_discards_with_on_discard(
                 &state.deduper,
-                std::slice::from_mut(&mut batch)
+                std::slice::from_mut(&mut batch),
+                |packet| publish_ingress_drop(
+                    ingress_events,
+                    packet.transaction_trace(),
+                    IngressDropReason::Duplicate
+                ),
             ));
         state
             .stats
@@ -303,7 +326,13 @@ impl SigVerifyWorkerPool {
             let floor = floor.get();
             if floor > 0 {
                 let ((dropped, all_below), priority_floor_time_us) = measure_us!(
-                    apply_priority_floor_to_batch(&mut batch, floor, &working_bank)
+                    apply_priority_floor_to_batch(&mut batch, floor, &working_bank, |packet| {
+                        publish_ingress_drop(
+                            ingress_events,
+                            packet.transaction_trace(),
+                            IngressDropReason::InsufficientPriority,
+                        );
+                    })
                 );
                 state
                     .stats
@@ -323,9 +352,14 @@ impl SigVerifyWorkerPool {
             }
         }
 
-        let (_, verify_time_us) = measure_us!(sigverify::ed25519_verify_serial(
+        let (_, verify_time_us) = measure_us!(sigverify::ed25519_verify_serial_with_on_discard(
             &mut batch,
             reject_non_vote,
+            |packet| publish_ingress_drop(
+                ingress_events,
+                packet.transaction_trace(),
+                IngressDropReason::InvalidSignature
+            ),
         ));
         let num_valid_packets = sigverify::count_valid_packets(std::iter::once(&batch));
         state
@@ -350,8 +384,9 @@ impl SigVerifyWorkerPool {
             .fetch_max(state.banking_stage_sender.len(), Ordering::Relaxed);
         match state
             .banking_stage_sender
-            .send(banking_packet_batch.clone())
-        {
+            .send_with_on_drop(banking_packet_batch.clone(), |batch| {
+                publish_ingress_drops(ingress_events, batch.iter(), IngressDropReason::Capacity);
+            }) {
             Ok(0) => {} // avoid poking atomics if nothing was evicted (typical case)
             Ok(evicted) => {
                 // record evicted amount into metrics
@@ -412,6 +447,7 @@ fn apply_priority_floor_to_batch(
     batch: &mut PacketBatch,
     floor: u64,
     bank: &Bank,
+    mut on_discard: impl FnMut(&BytesPacket),
 ) -> (usize, bool) {
     let mut dropped: usize = 0;
     let mut any_kept = false;
@@ -429,6 +465,7 @@ fn apply_priority_floor_to_batch(
         match calculate_priority_from_bytes(bank, data) {
             Some(priority) if priority <= floor => {
                 packet.meta_mut().set_discard(true);
+                on_discard(packet);
                 dropped = dropped.saturating_add(1);
             }
             _ => any_kept = true,
