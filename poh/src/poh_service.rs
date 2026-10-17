@@ -129,6 +129,7 @@ impl PohService {
                     }
                     return;
                 }
+                poh_recorder.read().unwrap().initialize_transaction_events();
                 if poh_config.hashes_per_tick.is_none() {
                     if poh_config.target_tick_count.is_none() {
                         Self::low_power_tick_producer(
@@ -816,7 +817,7 @@ mod tests {
         record_sender
             .try_send(Record {
                 mixin: Hash::new_unique(),
-                transactions: vec![VersionedTransaction::from(test_tx())],
+                transactions: vec![VersionedTransaction::from(test_tx()).into()],
                 bank_id: bank.bank_id(),
             })
             .unwrap();

@@ -1,6 +1,7 @@
 use {
     super::{
         consumer::{Consumer, ExecuteAndCommitTransactionsOutput, ProcessTransactionBatchOutput},
+        events::RetryReason,
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
         scheduler_messages::{ConsumeWork, FinishedConsumeWork},
     },
@@ -67,7 +68,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.metrics.clone()
     }
 
-    pub fn run(self) -> Result<(), ConsumeWorkerError<Tx>> {
+    pub fn run(mut self) -> Result<(), ConsumeWorkerError<Tx>> {
         let mut did_work = false;
         let mut last_empty_time = Instant::now();
         let mut sleep_duration = STARTING_SLEEP_DURATION;
@@ -103,7 +104,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     }
 
     fn consume(
-        &self,
+        &mut self,
         work: ConsumeWork<Tx>,
     ) -> Result<ProcessingStatus<Tx>, ConsumeWorkerError<Tx>> {
         let Some(leader_state) = active_leader_state(&self.shared_leader_state) else {
@@ -121,6 +122,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             bank,
             &work.transactions,
             &work.max_ages,
+            Some(work.batch_id),
             &ExecutionFlags {
                 drop_on_failure: false,
                 all_or_nothing: false,
@@ -154,7 +156,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let retryable_indexes: Vec<_> = (0..work.transactions.len())
             .map(|index| RetryableIndex {
                 index,
-                immediately_retryable: true,
+                reason: RetryReason::BankUnavailable,
             })
             .collect();
         let num_retryable = retryable_indexes.len();
@@ -429,6 +431,7 @@ pub(crate) mod external {
                 bank,
                 &transactions,
                 &max_ages,
+                None,
                 &execution_flags,
             );
 
@@ -1349,7 +1352,7 @@ pub(crate) mod external {
             let recorder = TransactionRecorder::new(record_sender);
             let (replay_vote_sender, replay_vote_receiver) = bounded(1024);
             let committer = Committer::new(None, replay_vote_sender, None);
-            let consumer = Consumer::new(committer, recorder, None);
+            let consumer = Consumer::new(committer, recorder, None, None);
             let shared_leader_state = SharedLeaderState::new(0, None, None);
             let exit = Arc::new(AtomicBool::new(false));
 
@@ -2970,7 +2973,7 @@ mod tests {
 
         let (replay_vote_sender, replay_vote_receiver) = bounded(1024);
         let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let consumer = Consumer::new(committer, recorder, None, None);
         let shared_leader_state = SharedLeaderState::new(0, None, None);
 
         let (consume_sender, consume_receiver) = bounded(1024);
@@ -3040,7 +3043,7 @@ mod tests {
         assert_eq!(consumed.work.max_ages, vec![max_age]);
         assert_eq!(
             consumed.retryable_indexes,
-            vec![RetryableIndex::new(0, true)]
+            vec![RetryableIndex::new(0, RetryReason::BankUnavailable)]
         );
 
         drop(test_frame);
@@ -3090,7 +3093,7 @@ mod tests {
             assert_eq!(consumed.work.batch_id, TransactionBatchId::new(i as u64));
             assert_eq!(
                 consumed.retryable_indexes,
-                vec![RetryableIndex::new(0, true)]
+                vec![RetryableIndex::new(0, RetryReason::BankUnavailable)]
             );
         }
 

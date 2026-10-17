@@ -290,14 +290,14 @@ impl VoteWorker {
     }
 
     fn process_packets_transactions(
-        &self,
+        &mut self,
         bank: &Bank,
         sanitized_transactions: &[impl TransactionWithMeta],
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> ProcessTransactionsSummary {
         let (mut process_transactions_summary, process_transactions_us) = measure_us!(
-            Self::process_transactions(&self.consumer, bank, sanitized_transactions)
+            Self::process_transactions(&mut self.consumer, bank, sanitized_transactions)
         );
         slot_metrics_tracker.increment_process_transactions_us(process_transactions_us);
         banking_stage_stats
@@ -346,7 +346,7 @@ impl VoteWorker {
     /// than the total number if max PoH height was reached and the bank halted
     #[cfg_attr(test, qualifier_attr::qualifiers(pub(crate)))]
     fn process_transactions(
-        consumer: &Consumer,
+        consumer: &mut Consumer,
         bank: &Bank,
         transactions: &[impl TransactionWithMeta],
     ) -> ProcessTransactionsSummary {
@@ -592,7 +592,7 @@ mod tests {
 
         let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
         let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let mut consumer = Consumer::new(committer, recorder, None, None);
 
         // Create and process a simple transfer transaction
         let pubkey = solana_pubkey::new_rand();
@@ -604,7 +604,7 @@ mod tests {
         )]);
 
         // Process some transactions on a bank that hasn't finished.
-        let summary = VoteWorker::process_transactions(&consumer, &bank, &transactions);
+        let summary = VoteWorker::process_transactions(&mut consumer, &bank, &transactions);
 
         // Assert - Transaction were prcoessed.
         assert!(summary.transaction_counts.committed_transactions_count.0 > 0);

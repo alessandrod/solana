@@ -292,10 +292,12 @@ pub fn hash_signatures(signatures: &[impl AsRef<[u8]>]) -> Hash {
     }
 }
 
-pub fn hash_transactions(transactions: &[VersionedTransaction]) -> Hash {
+pub fn hash_transactions<'a>(
+    transactions: impl IntoIterator<Item = &'a VersionedTransaction>,
+) -> Hash {
     // a hash of a slice of transactions only needs to hash the signatures
     let signatures: Vec<_> = transactions
-        .iter()
+        .into_iter()
         .flat_map(|tx| tx.signatures.iter())
         .collect();
     hash_signatures(&signatures)

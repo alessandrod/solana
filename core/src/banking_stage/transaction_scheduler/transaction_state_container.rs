@@ -70,8 +70,7 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     /// Panics if the transaction does not exist.
     fn get_transaction(&self, id: TransactionId) -> Option<&Tx>;
 
-    /// Retries a transaction - inserts transaction back into map.
-    /// This transitions the transaction to `Unprocessed` state.
+    /// Returns an in-flight transaction to its existing state for retry.
     fn retry_transaction(
         &mut self,
         transaction_id: TransactionId,
@@ -85,26 +84,20 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
         transaction_state.retry_transaction(transaction);
 
         if immediately_retryable {
-            self.push_ids_into_queue(std::iter::once(priority_id));
+            self.requeue_transactions(std::iter::once(priority_id));
         } else {
             self.hold_transaction(priority_id);
         }
     }
 
-    /// Pushes transaction ids into the priority queue. If the queue if full,
-    /// the lowest priority transactions will be dropped (removed from the
-    /// queue and map) **after** all ids have been pushed.
-    /// Returns the number of dropped transactions.
-    fn push_ids_into_queue(
-        &mut self,
-        priority_ids: impl Iterator<Item = TransactionPriorityId>,
-    ) -> usize;
+    /// Returns existing buffered transactions to the priority queue.
+    fn requeue_transactions(&mut self, priority_ids: impl Iterator<Item = TransactionPriorityId>);
 
     /// Hold the tarnsaction until the next flush (next slot).
     fn hold_transaction(&mut self, priority_id: TransactionPriorityId);
 
     /// Remove transaction by id.
-    fn remove_by_id(&mut self, id: TransactionId);
+    fn remove_by_id(&mut self, id: TransactionId) -> TransactionState<Tx>;
 
     fn flush_held_transactions(&mut self);
 
@@ -175,45 +168,25 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             .map(|state| state.transaction())
     }
 
-    fn push_ids_into_queue(
-        &mut self,
-        priority_ids: impl Iterator<Item = TransactionPriorityId>,
-    ) -> usize {
-        for id in priority_ids {
-            self.priority_queue.insert(id);
-        }
-
-        // The number of items in the `id_to_transaction_state` map is
-        // greater than or equal to the number of elements in the queue.
-        // To avoid the map going over capacity, we use the length of the
-        // map here instead of the queue.
-        let num_dropped = self
-            .id_to_transaction_state
-            .len()
-            .saturating_sub(self.capacity);
-
-        for _ in 0..num_dropped {
-            let priority_id = self.priority_queue.pop_first().expect("queue is not empty");
-            self.remove_state(priority_id.id);
-        }
-
-        num_dropped
+    fn requeue_transactions(&mut self, priority_ids: impl Iterator<Item = TransactionPriorityId>) {
+        self.priority_queue.extend(priority_ids);
     }
 
     fn hold_transaction(&mut self, priority_id: TransactionPriorityId) {
         self.held_transactions.push(priority_id);
     }
 
-    fn remove_by_id(&mut self, id: TransactionId) {
-        let priority_id = self.remove_state(id);
+    fn remove_by_id(&mut self, id: TransactionId) -> TransactionState<Tx> {
+        let (priority_id, state) = self.remove_state(id);
         // Remove from queue if present. May not be present if the transaction was already popped
         // (in-flight/scheduling).
         self.priority_queue.remove(&priority_id);
+        state
     }
 
     fn flush_held_transactions(&mut self) {
         let mut held_transactions = core::mem::take(&mut self.held_transactions);
-        self.push_ids_into_queue(held_transactions.drain(..));
+        self.requeue_transactions(held_transactions.drain(..));
         core::mem::swap(&mut self.held_transactions, &mut held_transactions);
     }
 
@@ -272,6 +245,23 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         transaction_id
     }
 
+    /// Queues a newly inserted transaction and evicts the lowest priority
+    /// transaction if the buffer exceeds capacity.
+    pub(crate) fn queue_transaction(
+        &mut self,
+        priority_id: TransactionPriorityId,
+    ) -> Option<TransactionState<Tx>> {
+        self.priority_queue.insert(priority_id);
+
+        // In-flight and held transactions count toward the buffer capacity.
+        if self.id_to_transaction_state.len() > self.capacity {
+            let priority_id = self.priority_queue.pop_first().expect("queue is not empty");
+            Some(self.remove_state(priority_id.id).1)
+        } else {
+            None
+        }
+    }
+
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
     #[cfg(test)]
@@ -286,15 +276,15 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
             self.insert_map_only(TransactionState::new(transaction, max_age, priority, cost));
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
 
-        self.push_ids_into_queue(std::iter::once(priority_id)) > 0
+        self.queue_transaction(priority_id).is_some()
     }
 
     fn get_vacant_map_entry(&mut self) -> VacantEntry<'_, TransactionState<Tx>> {
-        assert!(self.id_to_transaction_state.len() < self.id_to_transaction_state.capacity());
+        assert!(self.id_to_transaction_state.len() <= self.capacity);
         self.id_to_transaction_state.vacant_entry()
     }
 
-    fn remove_state(&mut self, id: TransactionId) -> TransactionPriorityId {
+    fn remove_state(&mut self, id: TransactionId) -> (TransactionPriorityId, TransactionState<Tx>) {
         let state = self.id_to_transaction_state.remove(id);
         let priority_id = TransactionPriorityId::new(state.priority(), id);
 
@@ -305,7 +295,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
             entry.remove();
         }
 
-        priority_id
+        (priority_id, state)
     }
 }
 
@@ -440,7 +430,7 @@ mod tests {
             let id = container.insert_map_only(packet_parser(data, priority, cost));
             let priority_id = TransactionPriorityId::new(priority, id);
             assert_eq!(
-                container.push_ids_into_queue(std::iter::once(priority_id)),
+                usize::from(container.queue_transaction(priority_id).is_some()),
                 0
             );
         }
@@ -453,7 +443,7 @@ mod tests {
             let id = container.insert_map_only(packet_parser(data, priority, cost));
             let priority_id = TransactionPriorityId::new(priority, id);
             assert_eq!(
-                container.push_ids_into_queue(std::iter::once(priority_id)),
+                usize::from(container.queue_transaction(priority_id).is_some()),
                 1,
             );
         }
@@ -471,7 +461,7 @@ mod tests {
         let id = container.insert_map_only(packet_parser(data, priority, cost));
         let priority_id = TransactionPriorityId::new(priority, id);
         assert_eq!(
-            container.push_ids_into_queue(std::iter::once(priority_id)),
+            usize::from(container.queue_transaction(priority_id).is_some()),
             1
         );
         assert!(container.pop().is_none());

@@ -4,12 +4,14 @@ use {
     self::{
         broadcast_duplicates_run::{BroadcastDuplicatesConfig, BroadcastDuplicatesRun},
         broadcast_metrics::*,
+        events::EntryShredded,
         standard_broadcast_run::StandardBroadcastRun,
     },
     crate::{
         XdpSender,
         cluster_nodes::{ClusterNodes, ClusterNodesCache},
     },
+    agave_event_system::PublisherFactory,
     agave_votor::event::VotorEventSender,
     crossbeam_channel::{
         Receiver, RecvError, RecvTimeoutError, SendError, Sender, TrySendError, bounded,
@@ -52,6 +54,7 @@ use {
 pub mod broadcast_duplicates_run;
 pub mod broadcast_metrics;
 pub(crate) mod broadcast_utils;
+pub mod events;
 pub(crate) mod standard_broadcast_run;
 
 const _: () = const {
@@ -175,6 +178,7 @@ impl BroadcastStageType {
         shred_version: u16,
         xdp_sender: Option<XdpSender>,
         votor_event_sender: VotorEventSender,
+        entry_events: Option<PublisherFactory<EntryShredded>>,
     ) -> BroadcastStage {
         let migration_status = bank_forks.read().unwrap().migration_status();
         match self {
@@ -191,6 +195,7 @@ impl BroadcastStageType {
                     migration_status,
                     votor_event_sender,
                     leader_schedule_cache,
+                    entry_events,
                 ),
                 xdp_sender,
             ),
@@ -216,6 +221,8 @@ impl BroadcastStageType {
 }
 
 trait BroadcastRun {
+    fn initialize_thread(&self) {}
+
     fn run<'db>(
         &mut self,
         keypair: &Keypair,
@@ -274,6 +281,7 @@ impl BroadcastStage {
         blockstore_sender: &Sender<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>,
         mut broadcast_stage_run: impl BroadcastRun,
     ) -> BroadcastStageReturnType {
+        broadcast_stage_run.initialize_thread();
         let mut pinnable_slice = blockstore.new_pinnable_slice();
         let mut write_batch = blockstore.get_write_batch().unwrap();
         loop {
@@ -906,6 +914,7 @@ pub mod test {
                 Arc::new(MigrationStatus::default()),
                 votor_event_sender,
                 leader_schedule_cache,
+                None,
             ),
             None,
         );

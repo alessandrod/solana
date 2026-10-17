@@ -1,4 +1,7 @@
-use {crate::banking_stage::scheduler_messages::MaxAge, solana_pubkey::Pubkey};
+use {
+    crate::banking_stage::scheduler_messages::MaxAge, solana_pubkey::Pubkey,
+    solana_runtime_transaction::transaction_meta::TransactionMeta,
+};
 
 /// TransactionState is used to track the state of a transaction in the transaction scheduler
 /// and banking stage as a whole.
@@ -58,11 +61,20 @@ impl<Tx> TransactionState<Tx> {
     ///
     /// # Panics
     /// This method will panic if the transaction has already been scheduled.
-    pub(crate) fn take_transaction_for_scheduling(&mut self) -> (Tx, MaxAge) {
-        let tx = self
+    pub(crate) fn take_transaction_for_scheduling(&mut self) -> (Tx, MaxAge)
+    where
+        Tx: TransactionMeta,
+    {
+        let mut tx = self
             .transaction
             .take()
             .expect("transaction not already pending");
+        if let Some(trace) = tx.transaction_trace_mut() {
+            trace.attempt = trace
+                .attempt
+                .checked_add(1)
+                .expect("transaction trace attempt overflow");
+        }
         (tx, self.max_age)
     }
 

@@ -1,5 +1,6 @@
 #![cfg(feature = "agave-unstable-api")]
 #![allow(clippy::arithmetic_side_effects)]
+pub mod events;
 pub mod evicting_sender;
 pub mod msghdr;
 pub mod nonblocking;
@@ -9,6 +10,7 @@ pub mod quic_socket;
 pub mod recvmmsg;
 pub mod sendmmsg;
 pub mod streamer;
+pub mod transaction_trace;
 
 #[macro_use]
 extern crate log;

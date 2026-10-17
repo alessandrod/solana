@@ -7,7 +7,8 @@ use {
             swqos::{SwQos, SwQosConfig},
         },
         quic_socket::QuicSocket,
-        streamer::StakedNodes,
+        streamer::{ChannelSend, StakedNodes},
+        transaction_trace::{TracedPacketSender, TransactionTracer},
     },
     crossbeam_channel::Sender,
     pem::Pem,
@@ -133,10 +134,15 @@ pub(crate) fn configure_server(
     Ok((server_config, cert_chain_pem))
 }
 
-fn rt(name: String, num_threads: NonZeroUsize) -> Runtime {
+fn rt(name: String, num_threads: NonZeroUsize, tracer: Option<Arc<TransactionTracer>>) -> Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name(name)
         .worker_threads(num_threads.get())
+        .on_thread_start(move || {
+            if let Some(tracer) = &tracer {
+                tracer.initialize_thread();
+            }
+        })
         .enable_all()
         .build()
         .unwrap()
@@ -555,6 +561,7 @@ pub const DEFAULT_STAKE_REVALIDATION_INTERVAL: RangeInclusive<Duration> =
 
 #[derive(Clone)]
 pub struct QuicStreamerConfig {
+    pub transaction_tracer: Option<Arc<TransactionTracer>>,
     pub max_connections_per_ipaddr_per_min: u64,
     pub wait_for_chunk_timeout: Duration,
     pub num_threads: NonZeroUsize,
@@ -583,6 +590,7 @@ pub struct SimpleQosQuicStreamerConfig {
 impl Default for QuicStreamerConfig {
     fn default() -> Self {
         Self {
+            transaction_tracer: None,
             max_connections_per_ipaddr_per_min: DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE,
             wait_for_chunk_timeout: DEFAULT_WAIT_FOR_CHUNK_TIMEOUT,
             num_threads: NonZeroUsize::new(num_cpus::get().min(1)).expect("1 is non-zero"),
@@ -623,7 +631,15 @@ where
     Q: QosController<C> + Send + Sync + 'static,
     C: ConnectionContext + Send + Sync + 'static,
 {
-    let runtime = rt(format!("{thread_name}Rt"), quic_server_params.num_threads);
+    let runtime = rt(
+        format!("{thread_name}Rt"),
+        quic_server_params.num_threads,
+        quic_server_params.transaction_tracer.clone(),
+    );
+    let packet_sender = TracedPacketSender {
+        sender: packet_sender,
+        tracer: quic_server_params.transaction_tracer.clone(),
+    };
     let result = {
         let _guard = runtime.enter();
         crate::nonblocking::quic::spawn_server(
@@ -752,6 +768,7 @@ mod test {
         rt(
             "solQuicTestRt".to_string(),
             QuicStreamerConfig::DEFAULT_NUM_SERVER_THREADS_FOR_TEST,
+            None,
         )
     }
 
