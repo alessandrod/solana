@@ -89,6 +89,7 @@ fn bench_sigverify_stage(bencher: &mut Bencher, use_same_tx: bool) {
         false,
         sharable_banks,
         None,
+        None,
     );
     let packet_s = packet_s;
     let packet_s_for_bench = packet_s.clone();

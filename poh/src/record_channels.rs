@@ -375,7 +375,7 @@ mod tests {
     pub(super) fn test_record(bank_id: BankId, num_transactions: usize) -> Record {
         Record {
             bank_id,
-            transactions: vec![VersionedTransaction::default(); num_transactions],
+            transactions: vec![VersionedTransaction::default().into(); num_transactions],
             mixin: Hash::default(),
         }
     }

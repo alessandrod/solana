@@ -5,9 +5,14 @@ use {
     },
     crate::banking_stage::{
         consumer::ENTRY_OVERHEAD_BYTES,
+        events::{TransactionEvent, publish_transaction_event},
         scheduler_messages::{
             ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
         },
+    },
+    agave_event_system::{
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
     },
     agave_scheduling_utils::thread_aware_account_locks::{
         MAX_THREADS, ThreadAwareAccountLocks, ThreadId, ThreadSet,
@@ -164,6 +169,7 @@ pub fn select_thread<Tx>(
 
 /// Common scheduler communication structure.
 pub(crate) struct SchedulingCommon<Tx> {
+    pub(crate) transaction_events: Option<Publisher<TransactionEvent>>,
     pub(crate) consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
     pub(crate) finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
     pub(crate) in_flight_tracker: InFlightTracker,
@@ -171,7 +177,7 @@ pub(crate) struct SchedulingCommon<Tx> {
     pub(crate) batches: Batches<Tx>,
 }
 
-impl<Tx> SchedulingCommon<Tx> {
+impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
     pub fn new(
         consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
@@ -184,6 +190,7 @@ impl<Tx> SchedulingCommon<Tx> {
             "cannot have more than {MAX_THREADS} workers"
         );
         Self {
+            transaction_events: None,
             batches: Batches::new(
                 consume_work_senders.len(),
                 target_num_transactions_per_batch,
@@ -203,10 +210,28 @@ impl<Tx> SchedulingCommon<Tx> {
         }
 
         let (ids, transactions, max_ages, total_cus) = self.batches.take_batch(thread_index);
-
         let batch_id = self
             .in_flight_tracker
             .track_batch(ids.len(), total_cus, thread_index);
+
+        if let Some(publisher) = self.transaction_events.as_mut()
+            && publisher.is_enabled()
+        {
+            let (tid, pid) = cached_thread_and_process_id();
+            for tx in &transactions {
+                if let Some(trace) = tx.transaction_trace() {
+                    let _ = publisher.publish(&TransactionEvent::Scheduled {
+                        pid,
+                        tid,
+                        timestamp_ns: monotonic_timestamp_ns(),
+                        trace_id: trace.id.0.get(),
+                        attempt: trace.attempt,
+                        slot,
+                        batch_id: batch_id.into(),
+                    });
+                }
+            }
+        }
 
         let num_scheduled = ids.len();
         let work = ConsumeWork {
@@ -265,10 +290,25 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
                     if let Some(&retryable_index) = retryable_iter.peek()
                         && retryable_index.index == index
                     {
+                        publish_transaction_event(
+                            &mut self.transaction_events,
+                            transaction.transaction_trace(),
+                            |timestamp_ns, trace| {
+                                let (tid, pid) = cached_thread_and_process_id();
+                                TransactionEvent::Requeued {
+                                    pid,
+                                    tid,
+                                    timestamp_ns,
+                                    trace_id: trace.id.0.get(),
+                                    attempt: trace.attempt,
+                                    reason: retryable_index.reason,
+                                }
+                            },
+                        );
                         container.retry_transaction(
                             id,
                             transaction,
-                            retryable_index.immediately_retryable,
+                            retryable_index.immediately_retryable(),
                         );
                         retryable_iter.next();
                         continue;
@@ -326,7 +366,7 @@ mod tests {
     use {
         super::*,
         crate::banking_stage::{
-            consumer::RetryableIndex,
+            consumer::RetryableIndex, events::RetryReason,
             transaction_scheduler::transaction_state_container::TransactionStateContainer,
         },
         crossbeam_channel::bounded,
@@ -574,8 +614,8 @@ mod tests {
         let work = work_receivers[0].try_recv().unwrap();
         assert_eq!(work.ids.len(), num_scheduled);
         let retryable_indexes = vec![
-            RetryableIndex::new(0, true),
-            RetryableIndex::new(1, false), // should be held by container.
+            RetryableIndex::new(0, RetryReason::AccountInUse),
+            RetryableIndex::new(1, RetryReason::BlockCostLimit), // should be held by container.
         ];
         let expected_num_retryable = retryable_indexes.len();
         let finished_work = FinishedConsumeWork {
@@ -607,7 +647,10 @@ mod tests {
         let num_scheduled = common.send_batch(0, TEST_SLOT).unwrap();
         let work = work_receivers[0].try_recv().unwrap();
         assert_eq!(work.ids.len(), num_scheduled);
-        let retryable_indexes = vec![RetryableIndex::new(1, true), RetryableIndex::new(0, true)];
+        let retryable_indexes = vec![
+            RetryableIndex::new(1, RetryReason::AccountInUse),
+            RetryableIndex::new(0, RetryReason::AccountInUse),
+        ];
         let finished_work = FinishedConsumeWork {
             work,
             retryable_indexes,

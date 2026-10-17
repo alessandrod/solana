@@ -3,9 +3,7 @@
 use {
     crate::{
         events::create_event_stream,
-        repair::{
-            repair_service::OutstandingShredRepairs, serve_repair::ServeRepair,
-        },
+        repair::{repair_service::OutstandingShredRepairs, serve_repair::ServeRepair},
         shred_fetch_stage::events::ShredReceived,
     },
     agave_event_system::{
@@ -116,7 +114,11 @@ impl ShredFetchStage {
             Some(turbine_mode),
         );
 
-        for ReceivedShredBatch { packets: mut packet_batch, received_ns } in recvr {
+        for ReceivedShredBatch {
+            packets: mut packet_batch,
+            received_ns,
+        } in recvr
+        {
             if publisher.is_enabled() {
                 let (tid, pid) = cached_thread_and_process_id();
                 let mut events = ArrayVec::<ShredReceived, PACKETS_PER_BATCH>::new();

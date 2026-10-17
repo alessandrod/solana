@@ -9488,6 +9488,7 @@ name = "solana-poh"
 version = "4.4.0-beta.1"
 dependencies = [
  "agave-cpu-utils",
+ "agave-event-system",
  "agave-logger",
  "agave-votor-messages",
  "arc-swap",
@@ -9512,6 +9513,7 @@ dependencies = [
  "solana-poh-config",
  "solana-pubkey 4.3.0",
  "solana-runtime",
+ "solana-runtime-transaction",
  "solana-sha256-hasher",
  "solana-signer",
  "solana-system-transaction",
@@ -10852,7 +10854,9 @@ dependencies = [
 name = "solana-streamer"
 version = "4.4.0-beta.1"
 dependencies = [
+ "agave-event-system",
  "agave-logger",
+ "agave-transaction-view",
  "anyhow",
  "anza-quinn",
  "assert_matches",
@@ -10879,6 +10883,7 @@ dependencies = [
  "solana-packet",
  "solana-perf",
  "solana-pubkey 4.3.0",
+ "solana-runtime-transaction",
  "solana-signer",
  "solana-streamer",
  "solana-time-utils",
@@ -11522,6 +11527,7 @@ dependencies = [
 name = "solana-turbine"
 version = "4.4.0-beta.1"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-logger",
  "agave-votor",
