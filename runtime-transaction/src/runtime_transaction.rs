@@ -10,7 +10,10 @@
 //!    ALT, RuntimeTransaction<SanitizedMessage> transits into Dynamically Loaded state,
 //!    with its dynamic metadata loaded.
 use {
-    crate::transaction_meta::{CachedTransactionMeta, TransactionConfiguration, TransactionMeta},
+    crate::{
+        transaction_meta::{CachedTransactionMeta, TransactionConfiguration, TransactionMeta},
+        transaction_trace::TransactionTraceContext,
+    },
     agave_feature_set::FeatureSet,
     agave_transaction_view::resolved_transaction_view::ResolvedTransactionView,
     bytes::Bytes,
@@ -41,6 +44,7 @@ pub struct RuntimeTransaction<T> {
     // transaction meta is a collection of fields, it is updated
     // during message state transition
     meta: CachedTransactionMeta,
+    pub trace: Option<TransactionTraceContext>,
 }
 
 impl<T> RuntimeTransaction<T> {
@@ -50,6 +54,14 @@ impl<T> RuntimeTransaction<T> {
 }
 
 impl<T> TransactionMeta for RuntimeTransaction<T> {
+    fn transaction_trace(&self) -> Option<TransactionTraceContext> {
+        self.trace
+    }
+
+    fn transaction_trace_mut(&mut self) -> Option<&mut TransactionTraceContext> {
+        self.trace.as_mut()
+    }
+
     fn message_hash(&self) -> &Hash {
         &self.meta.message_hash
     }

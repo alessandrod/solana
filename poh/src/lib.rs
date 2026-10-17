@@ -1,5 +1,6 @@
 #![cfg(feature = "agave-unstable-api")]
 #![allow(clippy::arithmetic_side_effects)]
+pub mod events;
 pub mod poh_controller;
 pub mod poh_recorder;
 pub mod poh_service;

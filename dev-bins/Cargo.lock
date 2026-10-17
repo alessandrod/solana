@@ -7602,6 +7602,7 @@ name = "solana-poh"
 version = "4.4.0"
 dependencies = [
  "agave-cpu-utils",
+ "agave-event-system",
  "agave-votor-messages",
  "arc-swap",
  "crossbeam-channel",
@@ -7617,6 +7618,7 @@ dependencies = [
  "solana-poh-config",
  "solana-pubkey 4.3.0",
  "solana-runtime",
+ "solana-runtime-transaction",
  "solana-transaction",
  "thiserror 2.0.20",
 ]
@@ -8625,6 +8627,8 @@ name = "solana-streamer"
 version = "4.4.0"
 dependencies = [
  "anza-quinn",
+ "agave-event-system",
+ "agave-transaction-view",
  "bytes",
  "crossbeam-channel",
  "futures 0.3.34",
@@ -8645,6 +8649,7 @@ dependencies = [
  "solana-packet",
  "solana-perf",
  "solana-pubkey 4.3.0",
+ "solana-runtime-transaction",
  "solana-signer",
  "solana-time-utils",
  "solana-tls-utils",
@@ -9139,6 +9144,7 @@ name = "solana-turbine"
 version = "4.4.0"
 dependencies = [
  "agave-feature-set",
+ "agave-event-system",
  "agave-votor",
  "agave-votor-messages",
  "bytes",

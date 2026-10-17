@@ -4,13 +4,19 @@ use {
     std::fmt::Display,
 };
 
-/// A unique identifier for a transaction batch.
+/// A unique identifier for a transaction batch within a scheduler instance.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct TransactionBatchId(u64);
 
 impl TransactionBatchId {
     pub fn new(index: u64) -> Self {
         Self(index)
+    }
+}
+
+impl From<TransactionBatchId> for u64 {
+    fn from(batch_id: TransactionBatchId) -> Self {
+        batch_id.0
     }
 }
 
