@@ -1,9 +1,14 @@
 use {
     super::{
         committer::{CommitTransactionDetails, Committer},
+        events::{BankingDropReason, RetryReason, TransactionEvent, TransactionEventFactories},
         leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
         qos_service::QosService,
-        scheduler_messages::MaxAge,
+        scheduler_messages::{MaxAge, TransactionBatchId},
+    },
+    agave_event_system::{
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
     },
     smallvec::SmallVec,
     solana_measure::measure_us,
@@ -17,11 +22,18 @@ use {
         },
         transaction_batch::{OwnedOrBorrowed, TransactionBatch},
     },
-    solana_runtime_transaction::transaction_with_meta::{
-        StaticMessageWithMeta, TransactionWithMeta,
+    solana_runtime_transaction::{
+        recording_transaction::RecordingTransaction,
+        transaction_trace::TransactionTraceContext,
+        transaction_with_meta::{StaticMessageWithMeta, TransactionWithMeta},
     },
     solana_svm::{
         account_loader::{TransactionCheckResult, fee_payer_load_filter, validate_fee_payer},
+        events::{
+            ExecutionEventContext, InstructionExecutionEvent, TransactionProcessingDetails,
+            TransactionProcessingEvent, publish_instruction_execution,
+            publish_transaction_processing,
+        },
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_processing_result::TransactionProcessingResultExtensions,
         transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
@@ -37,6 +49,18 @@ pub const TARGET_NUM_TRANSACTIONS_PER_BATCH: usize = 64;
 pub(crate) const ENTRY_OVERHEAD_BYTES: u64 = 48;
 
 const SERIALIZED_ENTRIES_OVERHEAD: u64 = ENTRY_OVERHEAD_BYTES + 8; // Vec<Entry> length
+
+struct TransactionEventDetails {
+    index: usize,
+    trace: TransactionTraceContext,
+    processed: bool,
+    processing: Option<TransactionProcessingDetails>,
+}
+
+struct BatchEventContext {
+    lifecycle: Option<(TransactionBatchId, u64)>,
+    processing: bool,
+}
 
 #[derive(Debug)]
 pub struct ExecutionFlags {
@@ -60,15 +84,25 @@ pub struct ExecutionFlags {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RetryableIndex {
     pub index: usize,
-    pub immediately_retryable: bool,
+    pub reason: RetryReason,
 }
 
-#[cfg(test)]
 impl RetryableIndex {
-    pub fn new(index: usize, immediately_retryable: bool) -> Self {
-        Self {
-            index,
-            immediately_retryable,
+    #[cfg(test)]
+    pub fn new(index: usize, reason: RetryReason) -> Self {
+        Self { index, reason }
+    }
+
+    pub(crate) fn immediately_retryable(&self) -> bool {
+        match self.reason {
+            RetryReason::AccountInUse
+            | RetryReason::BlockDataLimit
+            | RetryReason::BankUnavailable
+            | RetryReason::RecordingFailed => true,
+            RetryReason::BlockCostLimit
+            | RetryReason::VoteCostLimit
+            | RetryReason::AccountCostLimit
+            | RetryReason::AccountDataLimit => false,
         }
     }
 }
@@ -108,6 +142,10 @@ pub struct LeaderProcessedTransactionCounts {
 }
 
 pub struct Consumer {
+    transaction_events: Option<Publisher<TransactionEvent>>,
+    processing_events: Option<Publisher<TransactionProcessingEvent>>,
+    instruction_events: Option<Publisher<InstructionExecutionEvent>>,
+    event_details: Vec<TransactionEventDetails>,
     committer: Committer,
     transaction_recorder: TransactionRecorder,
     log_messages_bytes_limit: Option<usize>,
@@ -117,9 +155,19 @@ impl Consumer {
     pub fn new(
         committer: Committer,
         transaction_recorder: TransactionRecorder,
+        transaction_events: Option<TransactionEventFactories>,
         log_messages_bytes_limit: Option<usize>,
     ) -> Self {
         Self {
+            transaction_events: transaction_events
+                .as_ref()
+                .and_then(|factories| factories.lifecycle.try_create_publisher()),
+            processing_events: transaction_events
+                .as_ref()
+                .and_then(|factories| factories.processing.try_create_publisher()),
+            instruction_events: transaction_events
+                .and_then(|factories| factories.instructions.try_create_publisher()),
+            event_details: Vec::new(),
             committer,
             transaction_recorder,
             log_messages_bytes_limit,
@@ -127,7 +175,7 @@ impl Consumer {
     }
 
     pub fn process_and_record_transactions(
-        &self,
+        &mut self,
         bank: &Bank,
         txs: &[impl TransactionWithMeta],
     ) -> ProcessTransactionBatchOutput {
@@ -159,6 +207,7 @@ impl Consumer {
             bank,
             txs,
             check_results,
+            None,
             &ExecutionFlags {
                 simulate: false,
                 drop_on_failure: false,
@@ -175,10 +224,11 @@ impl Consumer {
     }
 
     pub fn process_and_record_aged_transactions(
-        &self,
+        &mut self,
         bank: &Bank,
         txs: &[impl TransactionWithMeta],
         max_ages: &[MaxAge],
+        batch_id: Option<TransactionBatchId>,
         flags: &ExecutionFlags,
     ) -> ProcessTransactionBatchOutput {
         // Need to filter out transactions since they were sanitized earlier.
@@ -191,14 +241,21 @@ impl Consumer {
                 max_age.alt_invalidation_slot,
             )
         });
-        self.process_and_record_transactions_with_pre_results(bank, txs, pre_results, flags)
+        self.process_and_record_transactions_with_pre_results(
+            bank,
+            txs,
+            pre_results,
+            batch_id,
+            flags,
+        )
     }
 
     fn process_and_record_transactions_with_pre_results(
-        &self,
+        &mut self,
         bank: &Bank,
         txs: &[impl TransactionWithMeta],
         pre_results: impl Iterator<Item = Result<(), TransactionError>>,
+        batch_id: Option<TransactionBatchId>,
         flags: &ExecutionFlags,
     ) -> ProcessTransactionBatchOutput {
         if flags.simulate {
@@ -211,7 +268,7 @@ impl Consumer {
                 cost_model_throttled_transactions_count: 0,
                 cost_model_us: 0,
                 execute_and_commit_transactions_output: self
-                    .execute_and_commit_transactions_locked(bank, &batch, flags),
+                    .execute_and_commit_transactions_locked(bank, &batch, flags, None),
             };
         }
 
@@ -235,13 +292,27 @@ impl Consumer {
             })
         ));
 
-        // retryable_txs includes AccountInUse, WouldExceedMaxBlockCostLimit
-        // WouldExceedMaxAccountCostLimit, WouldExceedMaxVoteCostLimit
-        // and WouldExceedMaxAccountDataCostLimit
+        let lifecycle = self.transaction_events.as_mut().and_then(|publisher| {
+            publisher.is_enabled().then(|| {
+                (
+                    batch_id.expect("traced batches have a scheduler ID"),
+                    monotonic_timestamp_ns(),
+                )
+            })
+        });
+        let processing = self
+            .processing_events
+            .as_mut()
+            .is_some_and(|publisher| publisher.is_enabled());
+        let events = (lifecycle.is_some() || processing).then_some(BatchEventContext {
+            lifecycle,
+            processing,
+        });
         let execute_and_commit_transactions_output =
-            self.execute_and_commit_transactions_locked(bank, &batch, flags);
+            self.execute_and_commit_transactions_locked(bank, &batch, flags, events.as_ref());
+        let events = events.map(|events| (events, monotonic_timestamp_ns()));
 
-        // Once the accounts are new transactions can enter the pipeline to process them
+        // Release account locks so other transactions can enter the pipeline.
         let (_, unlock_us) = measure_us!(drop(batch));
 
         let ExecuteAndCommitTransactionsOutput {
@@ -260,6 +331,15 @@ impl Consumer {
             bank,
         );
 
+        if let Some((events, end_ns)) = events {
+            self.publish_batch_events(
+                bank,
+                events,
+                end_ns,
+                &execute_and_commit_transactions_output,
+            );
+        }
+
         debug!(
             "bank: {} lock: {}us unlock: {}us txs_len: {}",
             bank.slot(),
@@ -275,11 +355,86 @@ impl Consumer {
         }
     }
 
+    fn publish_batch_events(
+        &mut self,
+        bank: &Bank,
+        events: BatchEventContext,
+        end_ns: u64,
+        output: &ExecuteAndCommitTransactionsOutput,
+    ) {
+        let counts = &output.transaction_counts;
+        let (tid, pid) = cached_thread_and_process_id();
+        let mut transaction_events = events.lifecycle.map(|(batch_id, start_ns)| {
+            let publisher = self
+                .transaction_events
+                .as_mut()
+                .expect("enabled lifecycle publisher");
+            let batch_id = batch_id.into();
+            let _ = publisher.publish(&TransactionEvent::BatchProcessed {
+                pid,
+                tid,
+                batch_id,
+                bank_id: bank.bank_id().into(),
+                start_ns,
+                end_ns,
+                num_transactions: counts.attempted_processing_count,
+                num_processed: counts.processed_count,
+                num_succeeded: counts.processed_with_successful_result_count,
+            });
+            publisher
+        });
+        let mut retryable_indexes = output.retryable_transaction_indexes.iter().peekable();
+
+        for details in self.event_details.drain(..) {
+            let trace = details.trace;
+            if let Some(publisher) = transaction_events.as_mut()
+                && !details.processed
+            {
+                while retryable_indexes
+                    .peek()
+                    .is_some_and(|retry| retry.index < details.index)
+                {
+                    retryable_indexes.next();
+                }
+
+                if retryable_indexes
+                    .peek()
+                    .is_none_or(|retry| retry.index != details.index)
+                {
+                    let _ = publisher.publish(&TransactionEvent::Dropped {
+                        pid,
+                        tid,
+                        timestamp_ns: end_ns,
+                        trace_id: trace.id.0.get(),
+                        attempt: trace.attempt,
+                        reason: BankingDropReason::ProcessingRejected,
+                    });
+                }
+            }
+            if let Some(processing) = details.processing {
+                publish_transaction_processing(
+                    self.processing_events
+                        .as_mut()
+                        .expect("enabled processing publisher"),
+                    ExecutionEventContext {
+                        slot: bank.slot(),
+                        bank_id: bank.bank_id().into(),
+                        trace_id: trace.id.0.get(),
+                        attempt: trace.attempt,
+                    },
+                    end_ns,
+                    &processing,
+                );
+            }
+        }
+    }
+
     fn execute_and_commit_transactions_locked(
-        &self,
+        &mut self,
         bank: &Bank,
         batch: &TransactionBatch<impl TransactionWithMeta>,
         flags: &ExecutionFlags,
+        events: Option<&BatchEventContext>,
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled =
             !flags.simulate && self.committer.transaction_status_sender_enabled();
@@ -297,35 +452,35 @@ impl Consumer {
                     // locking failure due to vote conflict or jito - immediately retry.
                     Some(RetryableIndex {
                         index,
-                        immediately_retryable: true,
+                        reason: RetryReason::AccountInUse,
                     })
                 }
                 Err(TransactionError::WouldExceedMaxBlockCostLimit) => {
                     error_counters.would_exceed_max_block_cost_limit += 1;
                     Some(RetryableIndex {
                         index,
-                        immediately_retryable: false,
+                        reason: RetryReason::BlockCostLimit,
                     })
                 }
                 Err(TransactionError::WouldExceedMaxVoteCostLimit) => {
                     error_counters.would_exceed_max_vote_cost_limit += 1;
                     Some(RetryableIndex {
                         index,
-                        immediately_retryable: false,
+                        reason: RetryReason::VoteCostLimit,
                     })
                 }
                 Err(TransactionError::WouldExceedMaxAccountCostLimit) => {
                     error_counters.would_exceed_max_account_cost_limit += 1;
                     Some(RetryableIndex {
                         index,
-                        immediately_retryable: false,
+                        reason: RetryReason::AccountCostLimit,
                     })
                 }
                 Err(TransactionError::WouldExceedAccountDataBlockLimit) => {
                     error_counters.would_exceed_account_data_block_limit += 1;
                     Some(RetryableIndex {
                         index,
-                        immediately_retryable: false,
+                        reason: RetryReason::AccountDataLimit,
                     })
                 }
                 // following are non-retryable errors
@@ -351,7 +506,7 @@ impl Consumer {
                     .filter_map(|(index, result)| {
                         result.is_ok().then_some(RetryableIndex {
                             index,
-                            immediately_retryable: true,
+                            reason: RetryReason::BankUnavailable,
                         })
                     }),
             );
@@ -369,6 +524,28 @@ impl Consumer {
             };
         };
 
+        let record_instructions = self
+            .instruction_events
+            .as_mut()
+            .is_some_and(|publisher| publisher.is_enabled())
+            && batch
+                .sanitized_transactions()
+                .iter()
+                .any(|tx| tx.transaction_trace().is_some());
+        let mut on_instruction = |index: usize, instruction| {
+            if let Some(trace) = batch.sanitized_transactions()[index].transaction_trace() {
+                publish_instruction_execution(
+                    self.instruction_events.as_mut().unwrap(),
+                    ExecutionEventContext {
+                        slot: bank.slot(),
+                        bank_id: bank.bank_id().into(),
+                        trace_id: trace.id.0.get(),
+                        attempt: trace.attempt,
+                    },
+                    instruction,
+                );
+            }
+        };
         let (load_and_execute_transactions_output, load_execute_us) =
             measure_us!(tx_execution_guard.load_and_execute_transactions(
                 batch,
@@ -379,9 +556,12 @@ impl Consumer {
                     account_overrides: None,
                     log_messages_bytes_limit: self.log_messages_bytes_limit,
                     limit_to_load_programs: true,
-                    recording_config: ExecutionRecordingConfig::new_single_setting(
-                        transaction_status_sender_enabled
-                    ),
+                    recording_config: ExecutionRecordingConfig {
+                        instruction_callback: record_instructions.then_some(&mut on_instruction),
+                        ..ExecutionRecordingConfig::new_single_setting(
+                            transaction_status_sender_enabled
+                        )
+                    },
                     drop_on_failure: flags.drop_on_failure,
                     all_or_nothing: flags.all_or_nothing,
                     strict_nonce_size_check: true,
@@ -420,13 +600,31 @@ impl Consumer {
         let (processed_transactions, processing_results_to_transactions_us) = measure_us!({
             let mut processed_transactions =
                 Vec::with_capacity(processed_counts.processed_transactions_count as usize);
-            for (processing_result, tx) in processing_results
+            for (index, (processing_result, tx)) in processing_results
                 .iter()
                 .zip(batch.sanitized_transactions())
+                .enumerate()
             {
+                if let Some(events) = events
+                    && let Some(trace) = tx.transaction_trace()
+                {
+                    if self.event_details.is_empty() {
+                        self.event_details.reserve(processing_results.len());
+                    }
+                    self.event_details.push(TransactionEventDetails {
+                        index,
+                        trace,
+                        processed: processing_result.was_processed(),
+                        processing: events.processing.then(|| processing_result.into()),
+                    });
+                }
+
                 if processing_result.was_processed() {
                     entry_bytes += tx.serialized_size() as u64;
-                    processed_transactions.push(tx.to_versioned_transaction());
+                    processed_transactions.push(RecordingTransaction {
+                        transaction: tx.to_versioned_transaction(),
+                        trace: tx.transaction_trace(),
+                    });
                 }
             }
             processed_transactions
@@ -445,6 +643,11 @@ impl Consumer {
                 .map_err(|err| match err {
                     EntryBytesReserveError::ExceedsSlotLimit => PohRecorderError::MaxHeightReached,
                 });
+        let retry_reason = if reserved_bytes.is_err() {
+            RetryReason::BlockDataLimit
+        } else {
+            RetryReason::RecordingFailed
+        };
         let (record_transactions_summary, record_us) = measure_us!(reserved_bytes.map(|_| {
             self.transaction_recorder
                 .record_transactions(bank.bank_id(), processed_transactions)
@@ -470,7 +673,7 @@ impl Consumer {
                 |(index, processing_result)| {
                     processing_result.was_processed().then_some(RetryableIndex {
                         index,
-                        immediately_retryable: true, // recording errors are always immediately retryable
+                        reason: retry_reason,
                     })
                 },
             ));
@@ -660,7 +863,7 @@ mod tests {
 
         let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
         let committer = Committer::new(transaction_status_sender, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let consumer = Consumer::new(committer, recorder, None, None);
 
         TestFrame {
             mint_keypair,
@@ -683,7 +886,7 @@ mod tests {
 
         let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
         let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let mut consumer = Consumer::new(committer, recorder, None, None);
         consumer.process_and_record_transactions(&bank, &transactions)
     }
 
@@ -708,7 +911,7 @@ mod tests {
             mint_keypair,
             bank,
             mut record_receiver,
-            consumer,
+            mut consumer,
             ..
         } = setup_test(None);
         let recipient = Pubkey::new_unique();
@@ -728,6 +931,7 @@ mod tests {
             &bank,
             &transactions,
             std::iter::once(Ok(())),
+            None,
             &ExecutionFlags {
                 simulate: true,
                 drop_on_failure: false,
@@ -785,7 +989,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             mut record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(None);
 
         let pubkey = solana_pubkey::new_rand();
@@ -851,7 +1055,7 @@ mod tests {
             retryable_transaction_indexes,
             vec![RetryableIndex {
                 index: 0,
-                immediately_retryable: true
+                reason: RetryReason::RecordingFailed,
             }]
         );
         assert_matches!(
@@ -869,7 +1073,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             record_receiver: _record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(None);
         let pubkey = Pubkey::new_unique();
 
@@ -937,7 +1141,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             record_receiver: _record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(None);
 
         let transactions = sanitize_transactions(vec![system_transaction::transfer(
@@ -984,7 +1188,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             record_receiver: _record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(None);
 
         let pubkey = solana_pubkey::new_rand();
@@ -1069,7 +1273,7 @@ mod tests {
         );
         assert_eq!(
             retryable_transaction_indexes,
-            vec![RetryableIndex::new(1, true)]
+            vec![RetryableIndex::new(1, RetryReason::AccountInUse)]
         );
 
         let expected_block_cost = {
@@ -1110,7 +1314,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             record_receiver: _record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(None);
 
         let get_block_cost = || bank.read_cost_tracker().unwrap().block_cost();
@@ -1160,7 +1364,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             record_receiver: _record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(None);
 
         let pubkey = solana_pubkey::new_rand();
@@ -1223,7 +1427,7 @@ mod tests {
         } else {
             assert_eq!(
                 retryable_transaction_indexes,
-                vec![RetryableIndex::new(1, true)]
+                vec![RetryableIndex::new(1, RetryReason::AccountInUse)]
             );
         }
     }
@@ -1279,7 +1483,7 @@ mod tests {
         assert_eq!(
             execute_and_commit_transactions_output.retryable_transaction_indexes,
             (1..transactions_len - 1)
-                .map(|index| RetryableIndex::new(index, true))
+                .map(|index| RetryableIndex::new(index, RetryReason::AccountInUse))
                 .collect::<Vec<_>>()
         );
     }
@@ -1365,7 +1569,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             mut record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(None);
 
         let pubkey = solana_pubkey::new_rand();
@@ -1417,7 +1621,7 @@ mod tests {
             .retryable_transaction_indexes
             .sort_unstable();
         let expected: Vec<_> = (0..transactions.len())
-            .map(|index| RetryableIndex::new(index, true))
+            .map(|index| RetryableIndex::new(index, RetryReason::RecordingFailed))
             .collect();
         assert_eq!(
             execute_and_commit_transactions_output.retryable_transaction_indexes,
@@ -1437,7 +1641,7 @@ mod tests {
             bank,
             bank_forks: _bank_forks,
             record_receiver: _record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(tss);
 
         let pubkey = solana_pubkey::new_rand();
@@ -1508,7 +1712,7 @@ mod tests {
             bank,
             bank_forks,
             mut record_receiver,
-            consumer,
+            mut consumer,
         } = setup_test(tss);
 
         let keypair = Keypair::new();

@@ -49,8 +49,13 @@ impl<D: TransactionData> RuntimeTransaction<SanitizedTransactionView<D>> {
         message_hash: MessageHash,
         is_simple_vote_tx: Option<bool>,
     ) -> Result<Self> {
-        from_sanitized_transaction_view(&transaction, message_hash, is_simple_vote_tx)
-            .map(|meta| RuntimeTransaction { transaction, meta })
+        from_sanitized_transaction_view(&transaction, message_hash, is_simple_vote_tx).map(|meta| {
+            RuntimeTransaction {
+                transaction,
+                meta,
+                trace: None,
+            }
+        })
     }
 }
 
@@ -60,8 +65,13 @@ impl<'a, D: TransactionData> RuntimeTransaction<&'a SanitizedTransactionView<D>>
         message_hash: MessageHash,
         is_simple_vote_tx: Option<bool>,
     ) -> Result<Self> {
-        from_sanitized_transaction_view(transaction, message_hash, is_simple_vote_tx)
-            .map(|meta| RuntimeTransaction { transaction, meta })
+        from_sanitized_transaction_view(transaction, message_hash, is_simple_vote_tx).map(|meta| {
+            RuntimeTransaction {
+                transaction,
+                meta,
+                trace: None,
+            }
+        })
     }
 }
 
@@ -134,7 +144,11 @@ impl<D: TransactionData> RuntimeTransaction<ResolvedTransactionView<D>> {
         loaded_addresses: Option<LoadedAddresses>,
         reserved_account_keys: &HashSet<Pubkey>,
     ) -> Result<Self> {
-        let RuntimeTransaction { transaction, meta } = statically_loaded_runtime_tx;
+        let RuntimeTransaction {
+            transaction,
+            meta,
+            trace,
+        } = statically_loaded_runtime_tx;
         // transaction-view does not distinguish between different types of errors here.
         // return generic sanitize failure error here.
         // these transactions should be immediately dropped, and we generally
@@ -143,7 +157,11 @@ impl<D: TransactionData> RuntimeTransaction<ResolvedTransactionView<D>> {
             ResolvedTransactionView::try_new(transaction, loaded_addresses, reserved_account_keys)
                 .map_err(|_| TransactionError::SanitizeFailure)?;
         crate::transaction_limits::validate_unique_account_keys(transaction.account_keys().iter())?;
-        let tx = Self { transaction, meta };
+        let tx = Self {
+            transaction,
+            meta,
+            trace,
+        };
         Ok(tx)
     }
 }

@@ -1,7 +1,6 @@
 use {
-    super::receive_and_buffer::{PrecheckResult, precheck_transaction},
+    super::receive_and_buffer::{CheckWork, PrecheckResult, precheck_transaction},
     crossbeam_channel::{Receiver, Sender},
-    solana_perf::packet::bytes::Bytes,
     solana_poh::poh_recorder::SharedLeaderState,
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::SharableBanks},
@@ -15,7 +14,7 @@ use {
 
 pub(crate) fn spawn_check_workers(
     num_workers: NonZeroUsize,
-    work_receiver: Receiver<Bytes>,
+    work_receiver: Receiver<CheckWork>,
     result_sender: Sender<PrecheckResult>,
     sharable_banks: SharableBanks,
     shared_leader_state: SharedLeaderState,
@@ -45,16 +44,18 @@ pub(crate) fn spawn_check_workers(
 }
 
 fn run_check_worker(
-    work_receiver: Receiver<Bytes>,
+    work_receiver: Receiver<CheckWork>,
     result_sender: Sender<PrecheckResult>,
     sharable_banks: SharableBanks,
     shared_leader_state: SharedLeaderState,
     filter_keys: Arc<HashSet<Pubkey>>,
 ) {
-    while let Ok(bytes) = work_receiver.recv() {
+    while let Ok(work) = work_receiver.recv() {
         let banks = sharable_banks.load();
         let working_bank = preferred_working_bank(&shared_leader_state, banks.working_bank);
-        let result = precheck_transaction(bytes, &banks.root_bank, &working_bank, &filter_keys);
+        let trace = work.trace;
+        let result = precheck_transaction(work, &banks.root_bank, &working_bank, &filter_keys)
+            .map_err(|err| (err, trace));
 
         // A result queue at capacity applies backpressure to check workers. Accepted
         // work is never dropped by a worker.
@@ -79,11 +80,20 @@ fn preferred_working_bank(
 #[cfg(test)]
 mod tests {
     use {
-        super::*, crate::banking_stage::tests::create_slow_genesis_config,
-        crossbeam_channel::bounded, solana_account::AccountSharedData,
-        solana_leader_schedule::SlotLeader, solana_ledger::genesis_utils::GenesisConfigInfo,
-        solana_perf::packet::BytesPacket, solana_poh::poh_recorder::LeaderState,
-        solana_runtime::bank::Bank, solana_sdk_ids::system_program, solana_signer::Signer,
+        super::*,
+        crate::banking_stage::{
+            tests::create_slow_genesis_config,
+            transaction_scheduler::receive_and_buffer::IngressCheckError,
+        },
+        crossbeam_channel::bounded,
+        solana_account::AccountSharedData,
+        solana_leader_schedule::SlotLeader,
+        solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_perf::packet::{BytesPacket, bytes::Bytes},
+        solana_poh::poh_recorder::LeaderState,
+        solana_runtime::bank::Bank,
+        solana_sdk_ids::system_program,
+        solana_signer::Signer,
         solana_system_transaction::transfer,
     };
 
@@ -128,7 +138,10 @@ mod tests {
         );
         for _ in 0..8 {
             work_sender
-                .send(transaction_bytes(&sharable_banks, &mint_keypair))
+                .send(CheckWork {
+                    bytes: transaction_bytes(&sharable_banks, &mint_keypair),
+                    trace: None,
+                })
                 .unwrap();
         }
 
@@ -184,17 +197,23 @@ mod tests {
         .unwrap();
 
         work_sender
-            .send(transaction_bytes(&sharable_banks, &mint_keypair))
+            .send(CheckWork {
+                bytes: transaction_bytes(&sharable_banks, &mint_keypair),
+                trace: None,
+            })
             .unwrap();
         assert!(result_receiver.recv().unwrap().is_ok());
 
         shared_leader_state.store(Arc::new(LeaderState::new(None, 0, None, None)));
         work_sender
-            .send(transaction_bytes(&sharable_banks, &mint_keypair))
+            .send(CheckWork {
+                bytes: transaction_bytes(&sharable_banks, &mint_keypair),
+                trace: None,
+            })
             .unwrap();
         assert!(matches!(
             result_receiver.recv().unwrap(),
-            Err(crate::banking_stage::transaction_scheduler::receive_and_buffer::IngressCheckError::FeePayer)
+            Err((IngressCheckError::FeePayer, None))
         ));
 
         drop(work_sender);

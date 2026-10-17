@@ -12,6 +12,7 @@
 //! RuntimeTransaction types, not the TransactionMeta itself.
 //!
 use {
+    crate::transaction_trace::TransactionTraceContext,
     agave_feature_set::FeatureSet,
     solana_compute_budget::compute_budget_limits::{
         MAX_COMPUTE_UNIT_LIMIT, MAX_HEAP_FRAME_BYTES, MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES,
@@ -30,6 +31,12 @@ use {
 };
 
 pub trait TransactionMeta {
+    fn transaction_trace(&self) -> Option<TransactionTraceContext> {
+        None
+    }
+    fn transaction_trace_mut(&mut self) -> Option<&mut TransactionTraceContext> {
+        None
+    }
     fn message_hash(&self) -> &Hash;
     fn is_simple_vote_transaction(&self) -> bool;
     fn signature_details(&self) -> &TransactionSignatureDetails;
