@@ -26,6 +26,30 @@ impl<T> EvictingSender<T> {
         Self { sender, receiver }
     }
 
+    /// Attempts to send, passing any evicted item to `on_evict` after the retry.
+    /// A failed incoming item is returned, even if an older item was evicted.
+    pub fn try_send_with_eviction(
+        &self,
+        msg: T,
+        on_evict: impl FnOnce(T),
+    ) -> Result<(), TrySendError<T>> {
+        let msg = match self.sender.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(msg)) => msg,
+            Err(TrySendError::Disconnected(_)) => unreachable!(),
+        };
+
+        match self.receiver.try_recv() {
+            Ok(older) => {
+                let result = self.sender.try_send(msg);
+                on_evict(older);
+                result
+            }
+            Err(TryRecvError::Empty) => self.sender.try_send(msg),
+            Err(TryRecvError::Disconnected) => unreachable!(),
+        }
+    }
+
     /// Create a new `EvictingSender` with a bounded channel of the specified capacity.
     #[inline]
     pub fn new_bounded(capacity: usize) -> (Self, Receiver<T>) {
@@ -39,29 +63,12 @@ where
     T: Send + 'static,
 {
     fn try_send(&self, msg: T) -> std::result::Result<(), TrySendError<T>> {
-        let Err(e) = self.sender.try_send(msg) else {
-            return Ok(());
-        };
+        let mut evicted = None;
+        self.try_send_with_eviction(msg, |older| evicted = Some(older))?;
 
-        match e {
-            // Prefer newer messages over older messages.
-            TrySendError::Full(msg) => match self.receiver.try_recv() {
-                Ok(older) => {
-                    // Attempt to requeue the newer message.
-                    // NB: if multiple senders are used, and another sender is faster than us to send() after we've popped `older`,
-                    // our try_send() will fail with Full(msg), in which case we drop the new message.
-                    self.sender.try_send(msg)?;
-                    // Propagate the error _with the older message_.
-                    Err(TrySendError::Full(older))
-                }
-                // Unlikely race condition -- it was just indicated that the channel is full.
-                // Attempt to requeue the message.
-                Err(TryRecvError::Empty) => self.sender.try_send(msg),
-                // Unreachable in practice since we maintain a reference to both the sender and receiver.
-                Err(TryRecvError::Disconnected) => unreachable!(),
-            },
-            // Unreachable in practice since we maintain a reference to both the sender and receiver.
-            TrySendError::Disconnected(_) => unreachable!(),
+        match evicted {
+            Some(older) => Err(TrySendError::Full(older)),
+            None => Ok(()),
         }
     }
 

@@ -806,6 +806,7 @@ impl BankingSimulator {
             shred_version,
             None,
             completed_block_sender,
+            None,
         );
 
         info!("Start banking stage!...");
@@ -813,6 +814,7 @@ impl BankingSimulator {
             block_production_method,
             poh_recorder.clone(),
             transaction_recorder,
+            None,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,

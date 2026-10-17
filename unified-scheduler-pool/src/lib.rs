@@ -38,8 +38,7 @@ use {
         },
         prioritization_fee_cache::PrioritizationFeeCache,
         transaction_execution::{
-            ExecutionCallbacks, TransactionBatchWithIndexes, TransactionStatusSender,
-            execute_batch,
+            ExecutionCallbacks, TransactionBatchWithIndexes, TransactionStatusSender, execute_batch,
         },
         vote_sender_types::{ReplayVoteSendType, ReplayVoteSender},
     },
