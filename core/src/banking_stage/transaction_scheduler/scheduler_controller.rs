@@ -14,7 +14,9 @@ use {
             consume_worker::ConsumeWorkerMetrics,
             consumer::Consumer,
             decision_maker::{BufferedPacketsDecision, DecisionMaker},
-            events::{BankingDropReason, TransactionEvent, publish_banking_drop},
+            events::{
+                BankingDropReason, SchedulerSlotEvent, TransactionEvent, publish_banking_drop,
+            },
             transaction_scheduler::{
                 receive_and_buffer::ReceivingStats, transaction_priority_id::TransactionPriorityId,
                 transaction_state_container::StateContainer,
@@ -23,8 +25,12 @@ use {
         validator::SchedulerPacing,
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
-    agave_event_system::PublisherFactory,
-    solana_clock::{BankId, DEFAULT_MS_PER_SLOT},
+    agave_event_system::{
+        PublisherFactory,
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
+    },
+    solana_clock::{BankId, DEFAULT_MS_PER_SLOT, Slot},
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
     solana_runtime::bank_forks::SharableBanks,
@@ -61,16 +67,41 @@ enum BankTransitionStatus {
 // mid-slot (e.g. during a sad leader handover) gets a new bank_id even though
 // the slot is unchanged.
 fn update_scheduling_bank(
-    scheduling_bank_id: &mut Option<BankId>,
-    decision_bank_id: Option<BankId>,
+    scheduling_bank: &mut Option<(BankId, Slot)>,
+    decision_bank: Option<(BankId, Slot)>,
     has_in_flight_transactions: bool,
+    slot_events: &mut Option<Publisher<SchedulerSlotEvent>>,
 ) -> BankTransitionStatus {
-    if *scheduling_bank_id == decision_bank_id {
+    if *scheduling_bank == decision_bank {
         BankTransitionStatus::Ready
     } else if has_in_flight_transactions {
         BankTransitionStatus::WaitingForInFlight
     } else {
-        *scheduling_bank_id = decision_bank_id;
+        if let Some(publisher) = slot_events
+            && publisher.is_enabled()
+        {
+            let (tid, pid) = cached_thread_and_process_id();
+            let timestamp_ns = monotonic_timestamp_ns();
+            if let Some((bank_id, slot)) = *scheduling_bank {
+                let _ = publisher.publish(&SchedulerSlotEvent::Complete {
+                    pid,
+                    tid,
+                    timestamp_ns,
+                    slot,
+                    bank_id: bank_id.into(),
+                });
+            }
+            if let Some((bank_id, slot)) = decision_bank {
+                let _ = publisher.publish(&SchedulerSlotEvent::Begin {
+                    pid,
+                    tid,
+                    timestamp_ns,
+                    slot,
+                    bank_id: bank_id.into(),
+                });
+            }
+        }
+        *scheduling_bank = decision_bank;
         BankTransitionStatus::Transitioned
     }
 }
@@ -162,6 +193,7 @@ where
     container: R::Container,
     /// State for scheduling and communicating with worker threads.
     scheduler: S,
+    slot_events: Option<Publisher<SchedulerSlotEvent>>,
     /// Metrics tracking counts on transactions in different states
     /// over an interval and during a leader slot.
     count_metrics: SchedulerCountMetrics,
@@ -192,7 +224,10 @@ where
         receive_and_buffer: R,
         sharable_banks: SharableBanks,
         mut scheduler: S,
-        transaction_events: Option<PublisherFactory<TransactionEvent>>,
+        (transaction_events, slot_events): (
+            Option<PublisherFactory<TransactionEvent>>,
+            Option<PublisherFactory<SchedulerSlotEvent>>,
+        ),
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         priority_floor: Arc<SchedulerPriorityFloor>,
     ) -> Self {
@@ -209,6 +244,7 @@ where
             sharable_banks,
             container: R::Container::with_capacity(container_capacity),
             scheduler,
+            slot_events: slot_events.and_then(|factory| factory.try_create_publisher()),
             count_metrics: SchedulerCountMetrics::default(),
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
@@ -220,7 +256,7 @@ where
     }
 
     pub fn run(&mut self) -> Result<(), SchedulerError> {
-        let mut scheduling_bank_id = None;
+        let mut scheduling_bank = None;
         let mut scheduling_blocked_at = None;
         let mut cost_pacer = None;
 
@@ -242,7 +278,7 @@ where
                 timing_metrics.decision_time_us += decision_time_us;
             });
             let new_leader_slot = decision.bank().map(|b| b.slot());
-            let new_leader_bank_id = decision.bank().map(|b| b.bank_id());
+            let new_leader_bank = decision.bank().map(|b| (b.bank_id(), b.slot()));
             self.count_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
             self.timing_metrics
@@ -253,9 +289,10 @@ where
             // so a bank replaced mid-slot during a sad leader handover still yields
             // a new bank_id and correctly triggers a transition here.
             let bank_transition_status = update_scheduling_bank(
-                &mut scheduling_bank_id,
-                new_leader_bank_id,
+                &mut scheduling_bank,
+                new_leader_bank,
                 self.scheduler.has_in_flight_transactions(),
+                &mut self.slot_events,
             );
             let scheduling_enabled =
                 bank_transition_status != BankTransitionStatus::WaitingForInFlight;
@@ -670,28 +707,51 @@ mod tests {
         // bank_id is globally unique regardless of slot, so tracking it alone
         // also correctly handles a sad leader handover: a new bank for the same
         // slot still carries a new bank_id and is treated as a transition below.
-        let mut scheduling_bank_id = Some(100);
+        let in_flight_bank_id = 100;
+        let newer_bank_id = 101;
+        let latest_bank_id = 102;
+        let mut scheduling_bank_id = Some((in_flight_bank_id, 1));
 
         assert_eq!(
-            update_scheduling_bank(&mut scheduling_bank_id, Some(101), true),
+            update_scheduling_bank(
+                &mut scheduling_bank_id,
+                Some((newer_bank_id, 1)),
+                true,
+                &mut None
+            ),
             BankTransitionStatus::WaitingForInFlight
         );
-        assert_eq!(scheduling_bank_id, Some(100));
+        assert_eq!(scheduling_bank_id, Some((in_flight_bank_id, 1)));
 
         // Ingestion may observe a newer bank while old work is still in flight.
         assert_eq!(
-            update_scheduling_bank(&mut scheduling_bank_id, Some(102), true),
+            update_scheduling_bank(
+                &mut scheduling_bank_id,
+                Some((latest_bank_id, 1)),
+                true,
+                &mut None
+            ),
             BankTransitionStatus::WaitingForInFlight
         );
-        assert_eq!(scheduling_bank_id, Some(100));
+        assert_eq!(scheduling_bank_id, Some((in_flight_bank_id, 1)));
 
         assert_eq!(
-            update_scheduling_bank(&mut scheduling_bank_id, Some(102), false),
+            update_scheduling_bank(
+                &mut scheduling_bank_id,
+                Some((latest_bank_id, 1)),
+                false,
+                &mut None
+            ),
             BankTransitionStatus::Transitioned
         );
-        assert_eq!(scheduling_bank_id, Some(102));
+        assert_eq!(scheduling_bank_id, Some((latest_bank_id, 1)));
         assert_eq!(
-            update_scheduling_bank(&mut scheduling_bank_id, Some(102), true),
+            update_scheduling_bank(
+                &mut scheduling_bank_id,
+                Some((latest_bank_id, 1)),
+                true,
+                &mut None
+            ),
             BankTransitionStatus::Ready
         );
     }
@@ -783,7 +843,7 @@ mod tests {
             receive_and_buffer,
             bank_forks.read().unwrap().sharable_banks(),
             scheduler,
-            None,
+            (None, None),
             vec![], // no actual workers with metrics to report, this can be empty
             Arc::new(SchedulerPriorityFloor::default()),
         );
