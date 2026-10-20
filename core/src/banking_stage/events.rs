@@ -7,6 +7,7 @@ use {
         wincode::{SchemaRead, SchemaWrite},
         wincode_dynamic::{DynPrimitiveTy, PrimitiveTy},
     },
+    solana_clock::Slot,
     solana_runtime_transaction::transaction_trace::TransactionTraceContext,
     solana_svm::events::{InstructionExecutionEvent, TransactionProcessingEvent},
 };
@@ -17,6 +18,31 @@ pub const TRANSACTION_PROCESSING_STREAM: StreamName =
     agave_event_system::stream_name!("tpu.transaction_processing");
 pub const INSTRUCTION_EXECUTION_STREAM: StreamName =
     agave_event_system::stream_name!("tpu.instruction_execution");
+pub const SCHEDULER_SLOT_EVENT_STREAM: StreamName =
+    agave_event_system::stream_name!("scheduler.slot_event");
+
+/// Slot lifecycle in the built-in scheduler. Timestamps are monotonic nanoseconds.
+/// Events are best effort and may be missing when the stream is backpressured.
+#[event]
+#[derive(Debug, Eq, PartialEq)]
+pub enum SchedulerSlotEvent {
+    /// The controller adopted this bank and can begin scheduling transactions.
+    Begin {
+        pid: i32,
+        tid: i32,
+        timestamp_ns: u64,
+        slot: Slot,
+        bank_id: u64,
+    },
+    /// The controller switched away from this bank after all its in-flight batches returned.
+    Complete {
+        pid: i32,
+        tid: i32,
+        timestamp_ns: u64,
+        slot: Slot,
+        bank_id: u64,
+    },
+}
 
 #[derive(Clone, Debug)]
 pub struct TransactionEventFactories {

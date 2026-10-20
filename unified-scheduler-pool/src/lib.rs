@@ -1369,8 +1369,6 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             .block_verification_handler_count
             .unwrap_or_else(SchedulerPool::<S, TH>::default_handler_count);
         assert!(handler_count >= 1);
-        let handler_timings: HandlerTimings =
-            (0..handler_count).map(|_| CachePadded::default()).collect();
 
         assert_matches!(self.session_result_with_timings, None);
 
