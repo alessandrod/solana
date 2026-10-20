@@ -124,6 +124,7 @@ pub(crate) struct BatchCounter<T: BroadcastStats + Default> {
     // Filled in when the last batch of shreds is received,
     // signals how many batches of shreds to expect
     num_expected_batches: Option<usize>,
+    was_interrupted: bool,
     broadcast_shred_stats: T,
 }
 
@@ -142,7 +143,11 @@ impl<T: BroadcastStats + Default> SlotBroadcastStats<T> {
     pub(crate) fn get(&self, slot: Slot) -> Option<&BatchCounter<T>> {
         self.0.get(&slot)
     }
-    pub(crate) fn update(&mut self, new_stats: &T, batch_info: &Option<BroadcastShredBatchInfo>) {
+    pub(crate) fn update(
+        &mut self,
+        new_stats: &T,
+        batch_info: &Option<BroadcastShredBatchInfo>,
+    ) -> Option<(Slot, bool)> {
         if let Some(batch_info) = batch_info {
             let mut should_delete = false;
             {
@@ -155,6 +160,7 @@ impl<T: BroadcastStats + Default> SlotBroadcastStats<T> {
                 slot_batch_counter.num_batches += 1;
                 if let Some(num_expected_batches) = batch_info.num_expected_batches {
                     slot_batch_counter.num_expected_batches = Some(num_expected_batches);
+                    slot_batch_counter.was_interrupted = batch_info.was_interrupted;
                 }
                 if let Some(num_expected_batches) = slot_batch_counter.num_expected_batches
                     && slot_batch_counter.num_batches == num_expected_batches
@@ -162,17 +168,20 @@ impl<T: BroadcastStats + Default> SlotBroadcastStats<T> {
                     slot_batch_counter.broadcast_shred_stats.report_stats(
                         batch_info.slot,
                         batch_info.slot_start_ts,
-                        batch_info.was_interrupted,
+                        slot_batch_counter.was_interrupted,
                     );
                     should_delete = true;
                 }
             }
             if should_delete {
-                self.0
+                let slot_batch_counter = self
+                    .0
                     .remove(&batch_info.slot)
                     .expect("delete should be successful");
+                return Some((batch_info.slot, slot_batch_counter.was_interrupted));
             }
         }
+        None
     }
 }
 
