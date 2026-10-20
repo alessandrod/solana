@@ -13,7 +13,9 @@ use {
             TOTAL_BUFFERED_PACKETS,
             consume_worker::ConsumeWorkerMetrics,
             decision_maker::{BufferedPacketsDecision, DecisionMaker},
-            events::{BankingDropReason, TransactionEvent, publish_banking_drop},
+            events::{
+                BankingDropReason, SchedulerSlotEvent, TransactionEvent, publish_banking_drop,
+            },
             transaction_scheduler::{
                 receive_and_buffer::ReceivingStats, transaction_priority_id::TransactionPriorityId,
                 transaction_state_container::StateContainer,
@@ -22,8 +24,12 @@ use {
         validator::SchedulerPacing,
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
-    agave_event_system::PublisherFactory,
-    solana_clock::DEFAULT_MS_PER_SLOT,
+    agave_event_system::{
+        PublisherFactory,
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
+    },
+    solana_clock::{BankId, DEFAULT_MS_PER_SLOT, Slot},
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
     solana_runtime::bank_forks::SharableBanks,
@@ -47,6 +53,44 @@ const CHECK_CHUNK: usize = 128;
 const SATURATION_BUFFER_PCT: u8 = 99;
 /// Clear the priority floor once the retained buffer drains below this watermark.
 const DESATURATION_BUFFER_PCT: u8 = 95;
+
+// bank_id is globally unique (monotonically assigned per bank, regardless of
+// slot), so it alone is sufficient to detect a transition: a bank replaced
+// mid-slot (e.g. during a sad leader handover) gets a new bank_id even though
+// the slot is unchanged.
+fn update_scheduling_bank(
+    scheduling_bank: &mut Option<(BankId, Slot)>,
+    decision_bank: Option<(BankId, Slot)>,
+    slot_events: &mut Option<Publisher<SchedulerSlotEvent>>,
+) {
+    if *scheduling_bank != decision_bank {
+        if let Some(publisher) = slot_events
+            && publisher.is_enabled()
+        {
+            let (tid, pid) = cached_thread_and_process_id();
+            let timestamp_ns = monotonic_timestamp_ns();
+            if let Some((bank_id, slot)) = *scheduling_bank {
+                let _ = publisher.publish(&SchedulerSlotEvent::Complete {
+                    pid,
+                    tid,
+                    timestamp_ns,
+                    slot,
+                    bank_id: bank_id.into(),
+                });
+            }
+            if let Some((bank_id, slot)) = decision_bank {
+                let _ = publisher.publish(&SchedulerSlotEvent::Begin {
+                    pid,
+                    tid,
+                    timestamp_ns,
+                    slot,
+                    bank_id: bank_id.into(),
+                });
+            }
+        }
+        *scheduling_bank = decision_bank;
+    }
+}
 
 #[derive(Clone)]
 pub struct SchedulerConfig {
@@ -135,6 +179,7 @@ where
     container: R::Container,
     /// State for scheduling and communicating with worker threads.
     scheduler: S,
+    slot_events: Option<Publisher<SchedulerSlotEvent>>,
     /// Metrics tracking counts on transactions in different states
     /// over an interval and during a leader slot.
     count_metrics: SchedulerCountMetrics,
@@ -165,7 +210,10 @@ where
         receive_and_buffer: R,
         sharable_banks: SharableBanks,
         mut scheduler: S,
-        transaction_events: Option<PublisherFactory<TransactionEvent>>,
+        (transaction_events, slot_events): (
+            Option<PublisherFactory<TransactionEvent>>,
+            Option<PublisherFactory<SchedulerSlotEvent>>,
+        ),
         worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
         priority_floor: Arc<SchedulerPriorityFloor>,
     ) -> Self {
@@ -182,6 +230,7 @@ where
             sharable_banks,
             container: R::Container::with_capacity(container_capacity),
             scheduler,
+            slot_events: slot_events.and_then(|factory| factory.try_create_publisher()),
             count_metrics: SchedulerCountMetrics::default(),
             timing_metrics: SchedulerTimingMetrics::default(),
             worker_metrics,
@@ -194,6 +243,7 @@ where
 
     pub fn run(&mut self) -> Result<(), SchedulerError> {
         let mut most_recent_leader_slot = None;
+        let mut scheduling_bank = None;
         let mut cost_pacer = None;
 
         while !self.exit.load(Ordering::Relaxed) {
@@ -214,11 +264,13 @@ where
                 timing_metrics.decision_time_us += decision_time_us;
             });
             let new_leader_slot = decision.bank().map(|b| b.slot());
+            let new_leader_bank = decision.bank().map(|b| (b.bank_id(), b.slot()));
             self.count_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
             self.timing_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
 
+            update_scheduling_bank(&mut scheduling_bank, new_leader_bank, &mut self.slot_events);
             if most_recent_leader_slot != new_leader_slot {
                 self.container.flush_held_transactions();
                 most_recent_leader_slot = new_leader_slot;
@@ -696,7 +748,7 @@ mod tests {
             receive_and_buffer,
             bank_forks.read().unwrap().sharable_banks(),
             scheduler,
-            None,
+            (None, None),
             vec![], // no actual workers with metrics to report, this can be empty
             Arc::new(SchedulerPriorityFloor::default()),
         );
