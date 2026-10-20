@@ -9,6 +9,7 @@ use {
             BankingStage,
             events::{
                 INSTRUCTION_EXECUTION_STREAM as BANKING_INSTRUCTION_EXECUTION_STREAM,
+                SCHEDULER_SLOT_EVENT_STREAM,
                 TRANSACTION_EVENT_STREAM as BANKING_TRANSACTION_EVENT_STREAM,
                 TRANSACTION_PROCESSING_STREAM as BANKING_TRANSACTION_PROCESSING_STREAM,
                 TransactionEventFactories as BankingTransactionEventFactories,
@@ -172,7 +173,11 @@ use {
     solana_turbine::{
         self,
         broadcast_stage::{
-            BroadcastStageType, events::ENTRY_EVENT_STREAM as TPU_ENTRY_EVENT_STREAM,
+            BroadcastStageType,
+            events::{
+                ENTRY_EVENT_STREAM as TPU_ENTRY_EVENT_STREAM,
+                SLOT_EVENT_STREAM as BROADCAST_SLOT_EVENT_STREAM,
+            },
         },
     },
     solana_unified_scheduler_pool::DefaultSchedulerPool,
@@ -1011,6 +1016,10 @@ impl Validator {
             publisher_slots: 256,
             subscriber_slots: 8,
         };
+        let slot_event_stream_config = StreamConfig {
+            capacity: 1024,
+            ..event_stream_config
+        };
         let tpu_event_factories = TpuEventFactories {
             ingress: create_event_stream(&event_system, INGRESS_EVENT_STREAM, event_stream_config),
             transactions: BankingTransactionEventFactories {
@@ -1034,6 +1043,16 @@ impl Validator {
                 &event_system,
                 TPU_ENTRY_EVENT_STREAM,
                 event_stream_config,
+            ),
+            scheduler_slots: create_event_stream(
+                &event_system,
+                SCHEDULER_SLOT_EVENT_STREAM,
+                slot_event_stream_config,
+            ),
+            broadcast_slots: create_event_stream(
+                &event_system,
+                BROADCAST_SLOT_EVENT_STREAM,
+                slot_event_stream_config,
             ),
         };
         let poh_transaction_events = create_event_stream(

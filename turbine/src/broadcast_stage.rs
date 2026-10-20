@@ -4,7 +4,7 @@ use {
     self::{
         broadcast_duplicates_run::{BroadcastDuplicatesConfig, BroadcastDuplicatesRun},
         broadcast_metrics::*,
-        events::EntryShredded,
+        events::{BroadcastSlotEvent, EntryShredded},
         standard_broadcast_run::StandardBroadcastRun,
     },
     crate::{
@@ -174,6 +174,7 @@ impl BroadcastStageType {
         xdp_sender: Option<XdpSender>,
         votor_event_sender: VotorEventSender,
         entry_events: Option<PublisherFactory<EntryShredded>>,
+        slot_events: Option<PublisherFactory<BroadcastSlotEvent>>,
     ) -> BroadcastStage {
         let migration_status = bank_forks.read().unwrap().migration_status();
         match self {
@@ -191,6 +192,7 @@ impl BroadcastStageType {
                     votor_event_sender,
                     leader_schedule_cache,
                     entry_events,
+                    slot_events,
                 ),
                 xdp_sender,
             ),
@@ -217,6 +219,7 @@ impl BroadcastStageType {
 
 trait BroadcastRun {
     fn initialize_thread(&self) {}
+    fn initialize_worker_thread(&self) {}
 
     fn run<'db>(
         &mut self,
@@ -401,24 +404,26 @@ impl BroadcastStage {
             let cluster_info = cluster_info.clone();
             let bank_forks = bank_forks.clone();
             let xdp_sender = xdp_sender.clone();
-            let run_transmit = move || loop {
-                let sock_variant = match xdp_sender.as_ref() {
-                    Some(xdp) => BroadcastSocket::Xdp(xdp),
-                    None => {
-                        let active_index = cluster_info.bind_ip_addrs().active_index();
-                        let active_socket = &group[active_index];
-                        BroadcastSocket::Udp(active_socket)
+            let run_transmit = move || {
+                bs_transmit.initialize_worker_thread();
+                loop {
+                    let sock_variant = match xdp_sender.as_ref() {
+                        Some(xdp) => BroadcastSocket::Xdp(xdp),
+                        None => {
+                            let active_index = cluster_info.bind_ip_addrs().active_index();
+                            let active_socket = &group[active_index];
+                            BroadcastSocket::Udp(active_socket)
+                        }
+                    };
+                    let res = bs_transmit.transmit(
+                        &socket_receiver,
+                        &cluster_info,
+                        sock_variant,
+                        &bank_forks,
+                    );
+                    if Self::should_exit_on_error(res, "solana-broadcaster-transmit") {
+                        break;
                     }
-                };
-                let res = bs_transmit.transmit(
-                    &socket_receiver,
-                    &cluster_info,
-                    sock_variant,
-                    &bank_forks,
-                );
-
-                if Self::should_exit_on_error(res, "solana-broadcaster-transmit") {
-                    break;
                 }
             };
             Builder::new()
@@ -432,6 +437,7 @@ impl BroadcastStage {
         thread_hdls.push({
             let blockstore = blockstore.clone();
             let run_record = move || {
+                broadcast_stage_run.initialize_worker_thread();
                 let mut pinnable_slice = blockstore.new_pinnable_slice();
                 let mut write_batch = blockstore.get_write_batch();
                 loop {
@@ -911,6 +917,7 @@ pub mod test {
                 Arc::new(MigrationStatus::default()),
                 votor_event_sender,
                 leader_schedule_cache,
+                None,
                 None,
             ),
             None,
