@@ -5,7 +5,8 @@ use {
     crate::{
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
         banking_stage::{
-            BankingControlMsg, BankingStage, BankingStageHandle, events::TransactionEventFactories,
+            BankingControlMsg, BankingStage, BankingStageHandle,
+            events::{SchedulerSlotEvent, TransactionEventFactories},
             transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         banking_trace::{Channels, TracerThread},
@@ -62,7 +63,10 @@ use {
     },
     solana_turbine::{
         XdpSender as TurbineXdpSender,
-        broadcast_stage::{BroadcastStage, BroadcastStageType, events::EntryShredded},
+        broadcast_stage::{
+            BroadcastStage, BroadcastStageType,
+            events::{BroadcastSlotEvent, EntryShredded},
+        },
     },
     std::{
         collections::{HashMap, HashSet},
@@ -90,6 +94,8 @@ pub struct TpuEventFactories {
     pub ingress: PublisherFactory<IngressEvent>,
     pub transactions: TransactionEventFactories,
     pub entries: PublisherFactory<EntryShredded>,
+    pub scheduler_slots: PublisherFactory<SchedulerSlotEvent>,
+    pub broadcast_slots: PublisherFactory<BroadcastSlotEvent>,
 }
 
 // Conservatively allow 20 TPS per validator.
@@ -334,6 +340,7 @@ impl Tpu {
             poh_recorder.clone(),
             transaction_recorder,
             Some(event_factories.transactions),
+            Some(event_factories.scheduler_slots),
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -399,6 +406,7 @@ impl Tpu {
             turbine_xdp_sender,
             votor_event_sender,
             Some(event_factories.entries),
+            Some(event_factories.broadcast_slots),
         );
 
         let mut key_notifiers = key_notifiers.write().unwrap();
