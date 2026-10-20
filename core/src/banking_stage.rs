@@ -3,8 +3,11 @@
 
 use {
     self::{
-        committer::Committer, consumer::Consumer, decision_maker::DecisionMaker,
-        events::TransactionEventFactories, vote_packet_receiver::VotePacketReceiver,
+        committer::Committer,
+        consumer::Consumer,
+        decision_maker::DecisionMaker,
+        events::{SchedulerSlotEvent, TransactionEventFactories},
+        vote_packet_receiver::VotePacketReceiver,
         vote_storage::VoteStorage,
     },
     crate::{
@@ -20,6 +23,7 @@ use {
         validator::BlockProductionMethod,
     },
     agave_banking_stage_ingress_types::{BankingPacketReceiver, SchedulerPriorityFloor},
+    agave_event_system::PublisherFactory,
     agave_votor::slot_clock::SharedAlpenglowSlotClock,
     crossbeam_channel::{Receiver, Sender, bounded},
     futures::{StreamExt, stream::FuturesUnordered},
@@ -343,6 +347,7 @@ pub struct BankingStage {
     non_vote_receiver: BankingPacketReceiver,
     transaction_recorder: TransactionRecorder,
     transaction_events: Option<TransactionEventFactories>,
+    slot_events: Option<PublisherFactory<SchedulerSlotEvent>>,
     poh_recorder: Arc<RwLock<PohRecorder>>,
     bank_forks: Arc<RwLock<BankForks>>,
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -361,6 +366,7 @@ impl BankingStage {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         transaction_recorder: TransactionRecorder,
         transaction_events: Option<TransactionEventFactories>,
+        slot_events: Option<PublisherFactory<SchedulerSlotEvent>>,
         non_vote_receiver: BankingPacketReceiver,
         tpu_vote_receiver: BankingPacketReceiver,
         gossip_vote_receiver: BankingPacketReceiver,
@@ -393,6 +399,7 @@ impl BankingStage {
             non_vote_receiver,
             transaction_recorder,
             transaction_events,
+            slot_events,
             poh_recorder,
             bank_forks,
             alpenglow_slot_clock,
@@ -601,6 +608,7 @@ impl BankingStage {
             .transaction_events
             .as_ref()
             .map(|factories| factories.lifecycle.clone());
+        let slot_events = self.slot_events.clone();
         let exit = exit.clone();
         let shutdown_signal = self.banking_shutdown_signal.clone();
         threads.push(
@@ -614,7 +622,7 @@ impl BankingStage {
                         receive_and_buffer,
                         sharable_banks,
                         scheduler,
-                        transaction_events,
+                        (transaction_events, slot_events),
                         worker_metrics,
                         priority_floor,
                     );
@@ -989,6 +997,7 @@ mod tests {
             poh_recorder,
             transaction_recorder,
             None,
+            None,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -1052,6 +1061,7 @@ mod tests {
             BlockProductionMethod::CentralSchedulerGreedy,
             poh_recorder.clone(),
             transaction_recorder,
+            None,
             None,
             non_vote_receiver,
             tpu_vote_receiver,
@@ -1206,6 +1216,7 @@ mod tests {
                 BlockProductionMethod::CentralSchedulerGreedy,
                 poh_recorder,
                 transaction_recorder,
+                None,
                 None,
                 non_vote_receiver,
                 tpu_vote_receiver,
