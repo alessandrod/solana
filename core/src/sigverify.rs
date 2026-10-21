@@ -13,7 +13,7 @@ use {
     solana_measure::measure_us,
     solana_perf::{
         deduper::{self, Deduper},
-        packet::{BytesPacket, PacketBatch},
+        packet::{PacketBatch, PacketRef},
         sigverify::{self},
     },
     solana_runtime::{bank::Bank, bank_forks::SharableBanks},
@@ -303,7 +303,7 @@ impl SigVerifyWorkerPool {
                 std::slice::from_mut(&mut batch),
                 |packet| publish_ingress_drop(
                     ingress_events,
-                    packet.trace,
+                    packet.trace(),
                     IngressDropReason::Duplicate
                 ),
             ));
@@ -329,7 +329,7 @@ impl SigVerifyWorkerPool {
                     apply_priority_floor_to_batch(&mut batch, floor, &working_bank, |packet| {
                         publish_ingress_drop(
                             ingress_events,
-                            packet.trace,
+                            packet.trace(),
                             IngressDropReason::InsufficientPriority,
                         );
                     })
@@ -359,7 +359,7 @@ impl SigVerifyWorkerPool {
             enable_tx_v1,
             |packet| publish_ingress_drop(
                 ingress_events,
-                packet.trace,
+                packet.trace(),
                 IngressDropReason::InvalidSignature
             ),
         ));
@@ -449,7 +449,7 @@ fn apply_priority_floor_to_batch(
     batch: &mut PacketBatch,
     floor: u64,
     bank: &Bank,
-    mut on_discard: impl FnMut(&BytesPacket),
+    mut on_discard: impl FnMut(PacketRef<'_>),
 ) -> (usize, bool) {
     let mut dropped: usize = 0;
     let mut any_kept = false;
@@ -467,7 +467,7 @@ fn apply_priority_floor_to_batch(
         match calculate_priority_from_bytes(bank, data) {
             Some(priority) if priority <= floor => {
                 packet.meta_mut().set_discard(true);
-                on_discard(packet);
+                on_discard(packet.as_ref());
                 dropped = dropped.saturating_add(1);
             }
             _ => any_kept = true,

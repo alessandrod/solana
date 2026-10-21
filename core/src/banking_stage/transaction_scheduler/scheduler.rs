@@ -3,6 +3,7 @@ use {
         scheduler_common::SchedulingCommon, scheduler_error::SchedulerError,
         transaction_state_container::StateContainer,
     },
+    solana_clock::Slot,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     std::num::Saturating,
 };
@@ -13,6 +14,7 @@ pub(crate) trait Scheduler<Tx: TransactionWithMeta> {
     /// before specific actions internally.
     fn schedule<S: StateContainer<Tx>>(
         &mut self,
+        slot: Slot,
         container: &mut S,
         budget: u64,
     ) -> Result<SchedulingSummary, SchedulerError>;

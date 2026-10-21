@@ -7793,6 +7793,7 @@ name = "solana-poh"
 version = "4.3.2"
 dependencies = [
  "agave-cpu-utils",
+ "agave-event-system",
  "agave-votor-messages",
  "arc-swap",
  "crossbeam-channel",
@@ -7808,6 +7809,7 @@ dependencies = [
  "solana-poh-config",
  "solana-pubkey 4.3.0",
  "solana-runtime",
+ "solana-runtime-transaction",
  "solana-transaction",
  "thiserror 2.0.21",
 ]
@@ -7970,6 +7972,7 @@ dependencies = [
  "bincode",
  "cfg-if 1.0.4",
  "itertools 0.14.0",
+ "libc",
  "log",
  "qualifier_attr",
  "rand 0.9.4",
@@ -8375,6 +8378,7 @@ name = "solana-runtime"
 version = "4.3.2"
 dependencies = [
  "agave-bls-cert-verify",
+ "agave-event-system",
  "agave-feature-set",
  "agave-fs",
  "agave-precompiles",
@@ -9624,6 +9628,8 @@ dependencies = [
 name = "solana-streamer"
 version = "4.3.2"
 dependencies = [
+ "agave-event-system",
+ "agave-transaction-view",
  "agave-xdp",
  "anza-quinn",
  "bytes",
@@ -9646,6 +9652,7 @@ dependencies = [
  "solana-packet 4.3.0",
  "solana-perf",
  "solana-pubkey 4.3.0",
+ "solana-runtime-transaction",
  "solana-signer",
  "solana-time-utils",
  "solana-tls-utils",
@@ -9659,6 +9666,7 @@ dependencies = [
 name = "solana-svm"
 version = "4.3.2"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "ahash 0.8.12",
  "bincode",
@@ -10170,6 +10178,7 @@ dependencies = [
 name = "solana-turbine"
 version = "4.3.2"
 dependencies = [
+ "agave-event-system",
  "agave-feature-set",
  "agave-votor",
  "agave-votor-messages",
@@ -10242,6 +10251,7 @@ name = "solana-unified-scheduler-pool"
 version = "4.3.2"
 dependencies = [
  "agave-banking-stage-ingress-types",
+ "agave-event-system",
  "assert_matches",
  "crossbeam-channel",
  "dashmap",

@@ -54,6 +54,13 @@ const SATURATION_BUFFER_PCT: u8 = 99;
 /// Clear the priority floor once the retained buffer drains below this watermark.
 const DESATURATION_BUFFER_PCT: u8 = 95;
 
+#[derive(Debug, PartialEq, Eq)]
+enum BankTransitionStatus {
+    Ready,
+    Transitioned,
+    WaitingForInFlight,
+}
+
 // bank_id is globally unique (monotonically assigned per bank, regardless of
 // slot), so it alone is sufficient to detect a transition: a bank replaced
 // mid-slot (e.g. during a sad leader handover) gets a new bank_id even though
@@ -61,9 +68,14 @@ const DESATURATION_BUFFER_PCT: u8 = 95;
 fn update_scheduling_bank(
     scheduling_bank: &mut Option<(BankId, Slot)>,
     decision_bank: Option<(BankId, Slot)>,
+    has_in_flight_transactions: bool,
     slot_events: &mut Option<Publisher<SchedulerSlotEvent>>,
-) {
-    if *scheduling_bank != decision_bank {
+) -> BankTransitionStatus {
+    if *scheduling_bank == decision_bank {
+        BankTransitionStatus::Ready
+    } else if has_in_flight_transactions {
+        BankTransitionStatus::WaitingForInFlight
+    } else {
         if let Some(publisher) = slot_events
             && publisher.is_enabled()
         {
@@ -75,7 +87,7 @@ fn update_scheduling_bank(
                     tid,
                     timestamp_ns,
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                 });
             }
             if let Some((bank_id, slot)) = decision_bank {
@@ -84,11 +96,12 @@ fn update_scheduling_bank(
                     tid,
                     timestamp_ns,
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                 });
             }
         }
         *scheduling_bank = decision_bank;
+        BankTransitionStatus::Transitioned
     }
 }
 
@@ -242,7 +255,6 @@ where
     }
 
     pub fn run(&mut self) -> Result<(), SchedulerError> {
-        let mut most_recent_leader_slot = None;
         let mut scheduling_bank = None;
         let mut cost_pacer = None;
 
@@ -270,10 +282,22 @@ where
             self.timing_metrics
                 .maybe_report_and_reset_slot(new_leader_slot);
 
-            update_scheduling_bank(&mut scheduling_bank, new_leader_bank, &mut self.slot_events);
-            if most_recent_leader_slot != new_leader_slot {
+            self.receive_completed()?;
+            let has_in_flight_transactions = self
+                .scheduler
+                .scheduling_common_mut()
+                .in_flight_tracker
+                .num_in_flight_per_thread()
+                .iter()
+                .any(|count| *count > 0);
+            let bank_transition_status = update_scheduling_bank(
+                &mut scheduling_bank,
+                new_leader_bank,
+                has_in_flight_transactions,
+                &mut self.slot_events,
+            );
+            if bank_transition_status == BankTransitionStatus::Transitioned {
                 self.container.flush_held_transactions();
-                most_recent_leader_slot = new_leader_slot;
                 cost_pacer = decision.bank().map(|b| {
                     let cost_tracker = b.read_cost_tracker().unwrap();
                     let block_limit = cost_tracker.get_block_limit();
@@ -309,9 +333,10 @@ where
                 });
             }
 
-            self.receive_completed()?;
             let mut receiving_stats = self.drain_check_results(&decision);
-            let _scheduled = self.process_transactions(&decision, cost_pacer.as_ref(), &now)?;
+            if bank_transition_status != BankTransitionStatus::WaitingForInFlight {
+                self.process_transactions(&decision, cost_pacer.as_ref(), &now)?;
+            }
             if decision.bank().is_none() {
                 let (_, clean_time_us) = measure_us!(self.incremental_recheck());
                 self.timing_metrics.update(|timing_metrics| {
@@ -358,14 +383,15 @@ where
         now: &Instant,
     ) -> Result<usize, SchedulerError> {
         let scheduled = match decision {
-            BufferedPacketsDecision::Consume(_bank) => {
+            BufferedPacketsDecision::Consume(bank) => {
                 let scheduling_budget = cost_pacer
                     .expect("cost pacer must be set for Consume")
                     .scheduling_budget(now);
-                let (scheduling_summary, schedule_time_us) = measure_us!(
-                    self.scheduler
-                        .schedule(&mut self.container, scheduling_budget,)?
-                );
+                let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
+                    bank.slot(),
+                    &mut self.container,
+                    scheduling_budget
+                )?);
 
                 self.count_metrics.update(|count_metrics| {
                     count_metrics.num_scheduled += scheduling_summary.num_scheduled;

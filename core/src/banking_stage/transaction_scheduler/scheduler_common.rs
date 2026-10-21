@@ -19,6 +19,7 @@ use {
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
     itertools::izip,
+    solana_clock::Slot,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
 };
 
@@ -203,7 +204,7 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
 
     /// Send a batch of transactions to the given thread's `ConsumeWork` channel.
     /// Returns the number of transactions sent.
-    pub fn send_batch(&mut self, thread_index: usize) -> Result<usize, SchedulerError> {
+    pub fn send_batch(&mut self, slot: Slot, thread_index: usize) -> Result<usize, SchedulerError> {
         if self.batches.ids[thread_index].is_empty() {
             return Ok(0);
         }
@@ -248,9 +249,9 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
 
     /// Send all batches of transactions to the worker threads.
     /// Returns the number of transactions sent.
-    pub fn send_batches(&mut self) -> Result<usize, SchedulerError> {
+    pub fn send_batches(&mut self, slot: Slot) -> Result<usize, SchedulerError> {
         (0..self.consume_work_senders.len())
-            .map(|thread_index| self.send_batch(thread_index))
+            .map(|thread_index| self.send_batch(slot, thread_index))
             .sum()
     }
 }
@@ -378,6 +379,63 @@ mod tests {
 
     const NUM_WORKERS: usize = 4;
     const DUMMY_COST: u64 = 1;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_scheduled_event_preserves_slot_and_trace() {
+        use {
+            crate::banking_stage::events::TRANSACTION_EVENT_STREAM,
+            agave_event_system::{EventSystem, StreamConfig, subscriber::StreamExplorer},
+            solana_runtime_transaction::transaction_trace::{TraceId, TransactionTraceContext},
+            std::num::NonZeroU64,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let event_system = EventSystem::new(directory.path()).unwrap();
+        event_system.set_stream_policy("on".parse().unwrap());
+        let factory = event_system
+            .create_stream::<TransactionEvent>(
+                TRANSACTION_EVENT_STREAM,
+                StreamConfig {
+                    capacity: 8,
+                    publisher_slots: 1,
+                    subscriber_slots: 1,
+                },
+            )
+            .unwrap();
+        let mut subscriber = StreamExplorer::new(directory.path().to_path_buf())
+            .available_streams()
+            .next()
+            .unwrap()
+            .try_connect_typed::<TransactionEvent>()
+            .unwrap();
+        let (sender, receiver) = bounded(1);
+        let (_finished_sender, finished_receiver) = bounded(1);
+        let mut common = SchedulingCommon::new(vec![sender], finished_receiver, 1);
+        common.transaction_events = factory.try_create_publisher();
+        let mut transaction = simple_transaction();
+        transaction.trace = Some(TransactionTraceContext {
+            id: TraceId(NonZeroU64::new(42).unwrap()),
+            attempt: 3,
+        });
+        common
+            .batches
+            .add_transaction_to_batch(0, 0, transaction, MaxAge::MAX, DUMMY_COST, 100);
+
+        assert_eq!(common.send_batch(77, 0).unwrap(), 1);
+        let work = receiver.recv().unwrap();
+        assert_eq!(work.transactions[0].trace.unwrap().attempt, 3);
+        assert_matches!(
+            subscriber.try_recv().unwrap().decode().unwrap(),
+            TransactionEvent::Scheduled {
+                slot: 77,
+                trace_id: 42,
+                attempt: 3,
+                batch_id,
+                ..
+            } if batch_id == u64::from(work.batch_id)
+        );
+    }
 
     fn simple_transaction() -> RuntimeTransaction<SanitizedTransaction> {
         RuntimeTransaction::from_transaction_for_tests(system_transaction::transfer(
@@ -533,7 +591,7 @@ mod tests {
 
         pop_and_add_transaction(&mut container, &mut common, 0);
         assert!(common.batches.entry_bytes()[0] > ENTRY_OVERHEAD_BYTES);
-        let num_scheduled = common.send_batch(0).unwrap();
+        let num_scheduled = common.send_batch(0, 0).unwrap();
         assert_eq!(num_scheduled, 1);
         assert_eq!(common.batches.entry_bytes()[0], ENTRY_OVERHEAD_BYTES);
         assert_eq!(work_receivers[0].len(), 1);
@@ -546,7 +604,7 @@ mod tests {
             &[DUMMY_COST, 0, 0, 0]
         );
 
-        let num_scheduled = common.send_batch(1).unwrap();
+        let num_scheduled = common.send_batch(0, 1).unwrap();
         assert_eq!(num_scheduled, 0);
         assert_eq!(work_receivers[1].len(), 0); // not actually sent since no transactions.
 
@@ -556,7 +614,7 @@ mod tests {
         pop_and_add_transaction(&mut container, &mut common, 0);
         pop_and_add_transaction(&mut container, &mut common, 2);
 
-        common.send_batches().unwrap();
+        common.send_batches(0).unwrap();
         assert_eq!(work_receivers[0].len(), 1);
         assert_eq!(work_receivers[1].len(), 0);
         assert_eq!(work_receivers[2].len(), 1);
@@ -583,7 +641,7 @@ mod tests {
 
         // Send a batch. Return completed work.
         pop_and_add_transaction(&mut container, &mut common, 0);
-        let num_scheduled = common.send_batch(0).unwrap();
+        let num_scheduled = common.send_batch(0, 0).unwrap();
 
         let work = work_receivers[0].try_recv().unwrap();
         assert_eq!(work.ids.len(), num_scheduled);
@@ -605,7 +663,7 @@ mod tests {
         pop_and_add_transaction(&mut container, &mut common, 0);
         pop_and_add_transaction(&mut container, &mut common, 0);
         pop_and_add_transaction(&mut container, &mut common, 0);
-        let num_scheduled = common.send_batch(0).unwrap();
+        let num_scheduled = common.send_batch(0, 0).unwrap();
         let work = work_receivers[0].try_recv().unwrap();
         assert_eq!(work.ids.len(), num_scheduled);
         let retryable_indexes = vec![
@@ -639,7 +697,7 @@ mod tests {
         add_transactions_to_container(&mut container, 2);
         pop_and_add_transaction(&mut container, &mut common, 0);
         pop_and_add_transaction(&mut container, &mut common, 0);
-        let num_scheduled = common.send_batch(0).unwrap();
+        let num_scheduled = common.send_batch(0, 0).unwrap();
         let work = work_receivers[0].try_recv().unwrap();
         assert_eq!(work.ids.len(), num_scheduled);
         let retryable_indexes = vec![

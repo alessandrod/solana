@@ -45,7 +45,6 @@ dev-context-only-utils = [
     "dep:solana-compute-budget",
     "dep:solana-compute-budget-instruction",
     "dep:solana-compute-budget-program",
-    "dep:solana-instruction-error",
     "dep:solana-precompile-error",
     "dep:solana-slot-hashes",
     "dep:solana-syscalls",

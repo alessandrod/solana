@@ -487,7 +487,7 @@ impl TransactionViewReceiveAndBuffer {
                 stats.num_dropped_without_parsing += 1;
                 publish_banking_drop(
                     transaction_events,
-                    packet.trace,
+                    packet.trace(),
                     BankingDropReason::NotLeader,
                 );
                 continue;
@@ -495,14 +495,14 @@ impl TransactionViewReceiveAndBuffer {
 
             match self.check_work_sender.try_send(CheckWork {
                 bytes: packet_bytes(packet, packet_data),
-                trace: packet.trace,
+                trace: packet.trace(),
             }) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     stats.num_dropped_on_check_work_queue_full += 1;
                     publish_banking_drop(
                         transaction_events,
-                        packet.trace,
+                        packet.trace(),
                         BankingDropReason::Capacity,
                     );
                 }

@@ -67,6 +67,7 @@ solana-message = { workspace = true }
 solana-net-utils = { path = "../net-utils", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-pubkey = { workspace = true, features = ["rand"] }
 solana-streamer = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

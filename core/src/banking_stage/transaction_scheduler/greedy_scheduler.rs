@@ -17,6 +17,7 @@ use {
         ThreadAwareAccountLocks, ThreadId, ThreadSet, TryLockError,
     },
     crossbeam_channel::{Receiver, Sender},
+    solana_clock::Slot,
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_ledger::shred::get_data_shred_bytes_per_batch_typical,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
@@ -81,6 +82,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
 impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
     fn schedule<S: StateContainer<Tx>>(
         &mut self,
+        slot: Slot,
         container: &mut S,
         budget: u64,
     ) -> Result<SchedulingSummary, SchedulerError> {
@@ -179,7 +181,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
                     if self.common.batches.entry_bytes()[thread_id] + transaction_bytes
                         > self.config.target_entry_bytes_per_batch
                     {
-                        num_sent += self.common.send_batches()?;
+                        num_sent += self.common.send_batches(slot)?;
                     }
 
                     num_scheduled += 1;
@@ -199,7 +201,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
                         || self.common.batches.entry_bytes()[thread_id]
                             >= self.config.target_entry_bytes_per_batch
                     {
-                        num_sent += self.common.send_batches()?;
+                        num_sent += self.common.send_batches(slot)?;
                     }
 
                     // if the thread is at target_cu_per_thread, remove it from the schedulable threads
@@ -218,7 +220,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
             }
         }
 
-        num_sent += self.common.send_batches()?;
+        num_sent += self.common.send_batches(slot)?;
         let Saturating(num_scheduled) = num_scheduled;
         assert_eq!(
             num_scheduled, num_sent,
@@ -410,6 +412,7 @@ mod test {
         drop(work_receivers); // explicitly drop receivers
         assert_matches!(
             scheduler.schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             ),
@@ -428,6 +431,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )
@@ -448,6 +452,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 0, // zero budget
             )
@@ -472,6 +477,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )
@@ -497,6 +503,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )
@@ -522,6 +529,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )
@@ -549,7 +557,7 @@ mod test {
             (&Keypair::new(), &[Pubkey::new_unique()], 3, 3),
         ]);
 
-        let scheduling_summary = scheduler.schedule(&mut container, u64::MAX).unwrap();
+        let scheduling_summary = scheduler.schedule(0, &mut container, u64::MAX).unwrap();
         assert_eq!(scheduling_summary.num_scheduled, 3);
         assert_eq!(scheduling_summary.num_unschedulable_conflicts, 0);
         assert_eq!(
@@ -578,6 +586,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )
@@ -596,6 +605,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )
@@ -635,6 +645,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )
@@ -670,6 +681,7 @@ mod test {
 
         let scheduling_summary = scheduler
             .schedule(
+                0,
                 &mut container,
                 u64::MAX, // no budget
             )

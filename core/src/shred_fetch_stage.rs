@@ -3,9 +3,7 @@
 use {
     crate::{
         events::create_event_stream,
-        repair::{
-            repair_service::OutstandingShredRepairs, serve_repair::ServeRepair,
-        },
+        repair::{repair_service::OutstandingShredRepairs, serve_repair::ServeRepair},
         shred_fetch_stage::events::ShredReceived,
     },
     agave_event_system::{
@@ -19,7 +17,9 @@ use {
         self,
         filter::{ShredFilterContext, TurbineMode},
     },
-    solana_perf::packet::{PACKETS_PER_BATCH, PacketBatch, PacketBatchRecycler, PacketFlags, PacketRef},
+    solana_perf::packet::{
+        PACKETS_PER_BATCH, PacketBatch, PacketBatchRecycler, PacketFlags, PacketRef,
+    },
     solana_runtime::bank_forks::{BankForks, SharableBanks},
     solana_streamer::{
         evicting_sender::EvictingSender,
@@ -85,6 +85,7 @@ struct RepairContext {
 
 impl ShredFetchStage {
     // updates packets received on a channel and sends them on another channel
+    #[allow(clippy::too_many_arguments)]
     fn modify_packets(
         publisher: &mut Publisher<ShredReceived>,
         recvr: Receiver<ReceivedShredBatch>,
@@ -112,7 +113,8 @@ impl ShredFetchStage {
         for ReceivedShredBatch {
             packets: mut packet_batch,
             received_ns,
-        } in recvr {
+        } in recvr
+        {
             if publisher.is_enabled() {
                 let (tid, pid) = cached_thread_and_process_id();
                 let mut events = ArrayVec::<ShredReceived, PACKETS_PER_BATCH>::new();

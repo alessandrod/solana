@@ -41,6 +41,7 @@ fn error_code(error: &InstructionError) -> u64 {
 
 /// Processing outcome retained in the final SVM result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, SchemaRead, SchemaWrite)]
+#[wincode(crate = "agave_event_system::wincode")]
 pub enum TransactionProcessingKind {
     Rejected,
     FeesOnly,
@@ -54,6 +55,7 @@ impl DynPrimitiveTy for TransactionProcessingKind {
 
 /// The phase that reported a transaction failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, SchemaRead, SchemaWrite)]
+#[wincode(crate = "agave_event_system::wincode")]
 pub enum ExecutionFailureStage {
     BeforeExecution,
     InstructionExecution,

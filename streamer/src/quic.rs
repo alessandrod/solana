@@ -7,7 +7,7 @@ use {
             swqos::{SwQos, SwQosConfig},
         },
         quic_socket::QuicSocket,
-        streamer::{ChannelSend, StakedNodes},
+        streamer::StakedNodes,
         transaction_trace::{TracedPacketSender, TransactionTracer},
     },
     crossbeam_channel::Sender,

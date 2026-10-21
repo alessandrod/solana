@@ -167,6 +167,7 @@ pub fn execute_txn(
     };
 
     let recording_config = ExecutionRecordingConfig {
+        instruction_callback: None,
         enable_cpi_recording: false,
         enable_log_recording: true,
         enable_return_data_recording: true,

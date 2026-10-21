@@ -84,7 +84,7 @@ pub struct BytesPacket {
     buffer: Bytes,
     meta: Meta,
     #[serde(skip)]
-    #[cfg_attr(feature = "stable-abi", stable_abi_sample(skip))]
+    #[cfg_attr(feature = "frozen-abi", stable_abi_sample(skip))]
     pub trace: Option<TransactionTraceContext>,
 }
 
@@ -387,6 +387,13 @@ impl<'a> From<&'a mut BytesPacket> for PacketRef<'a> {
 }
 
 impl<'a> PacketRef<'a> {
+    pub fn trace(&self) -> Option<TransactionTraceContext> {
+        match self {
+            Self::Packet(_) => None,
+            Self::Bytes(packet) => packet.trace,
+        }
+    }
+
     pub fn data<I>(&self, index: I) -> Option<&'a <I as SliceIndex<[u8]>>::Output>
     where
         I: SliceIndex<[u8]>,

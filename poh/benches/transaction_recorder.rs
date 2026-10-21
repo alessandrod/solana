@@ -19,7 +19,7 @@ use {
     solana_poh_config::PohConfig,
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, installed_scheduler_pool::BankWithScheduler},
-    solana_transaction::versioned::VersionedTransaction,
+    solana_runtime_transaction::recording_transaction::RecordingTransaction,
     std::{
         sync::{Arc, RwLock, atomic::AtomicBool},
         time::{Duration, Instant},
@@ -69,7 +69,7 @@ fn bench_record_transactions(c: &mut Criterion) {
 
     let txs: Vec<_> = (0..NUM_TRANSACTIONS)
         .map(|_| {
-            VersionedTransaction::from(solana_system_transaction::transfer(
+            RecordingTransaction::from(solana_system_transaction::transfer(
                 &Keypair::new(),
                 &Pubkey::new_unique(),
                 1,

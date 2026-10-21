@@ -6,10 +6,10 @@ use {
         },
         quic::{QuicServerError, QuicStreamerConfig, StreamerStats, configure_server},
         quic_socket::{QuicSocket, QuicXdpSocketParts, QuicXdpTxSocket},
-        streamer::StakedNodes,
+        streamer::{ChannelSend, StakedNodes},
     },
     bytes::{BufMut, Bytes, BytesMut},
-    crossbeam_channel::{Sender, TrySendError},
+    crossbeam_channel::TrySendError,
     futures::{Future, StreamExt as _, stream::FuturesUnordered},
     indexmap::map::{Entry, IndexMap},
     quinn::{
@@ -143,7 +143,7 @@ pub(crate) fn spawn_server<Q, C>(
     stats: Arc<StreamerStats>,
     sockets: impl IntoIterator<Item = QuicSocket>,
     keypair: &Keypair,
-    packet_sender: Sender<PacketBatch>,
+    packet_sender: impl ChannelSend<PacketBatch> + Clone + Sync,
     quic_server_params: QuicStreamerConfig,
     qos: Q,
     cancel: CancellationToken,
@@ -256,7 +256,7 @@ impl ClientConnectionTracker {
 async fn run_server<Q, C>(
     name: &'static str,
     endpoints: Vec<Endpoint>,
-    packet_batch_sender: Sender<PacketBatch>,
+    packet_batch_sender: impl ChannelSend<PacketBatch> + Clone + Sync,
     stats: Arc<StreamerStats>,
     quic_server_params: QuicStreamerConfig,
     cancel: CancellationToken,
@@ -473,7 +473,7 @@ async fn setup_connection<Q, C>(
     rate_limiter: Arc<ConnectionRateLimiter>,
     overall_connection_rate_limiter: Arc<TokenBucket>,
     client_connection_tracker: ClientConnectionTracker,
-    packet_sender: Sender<PacketBatch>,
+    packet_sender: impl ChannelSend<PacketBatch> + Clone + Sync,
     stats: Arc<StreamerStats>,
     server_params: Arc<QuicStreamerConfig>,
     qos: Arc<Q>,
@@ -594,7 +594,7 @@ fn handle_connection_error(e: quinn::ConnectionError, stats: &StreamerStats, fro
 }
 
 async fn handle_connection<Q, C>(
-    packet_sender: Sender<PacketBatch>,
+    packet_sender: impl ChannelSend<PacketBatch> + Clone + Sync,
     remote_address: SocketAddr,
     connection: Connection,
     stats: Arc<StreamerStats>,
@@ -765,7 +765,7 @@ fn handle_chunks(
     chunks: impl ExactSizeIterator<Item = Bytes>,
     accum: &mut PacketAccumulator,
     rtt: Duration,
-    packet_sender: &Sender<PacketBatch>,
+    packet_sender: &(impl ChannelSend<PacketBatch> + Sync),
     stats: &StreamerStats,
     peer_type: ConnectionPeerType,
     max_stream_data_bytes: u32,

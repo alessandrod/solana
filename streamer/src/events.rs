@@ -7,7 +7,7 @@ use {
         wincode::{SchemaRead, SchemaWrite},
         wincode_dynamic::{DynPrimitiveTy, PrimitiveTy},
     },
-    solana_perf::packet::BytesPacket,
+    solana_perf::packet::PacketRef,
     solana_runtime_transaction::transaction_trace::TransactionTraceContext,
 };
 
@@ -82,7 +82,7 @@ pub fn publish_ingress_drop(
 /// Publishes drops for packets that have not already been marked discarded.
 pub fn publish_ingress_drops<'a>(
     publisher: &mut Option<Publisher<IngressEvent>>,
-    packets: impl Iterator<Item = &'a BytesPacket>,
+    packets: impl Iterator<Item = PacketRef<'a>>,
     reason: IngressDropReason,
 ) {
     if let Some(publisher) = publisher
@@ -91,7 +91,7 @@ pub fn publish_ingress_drops<'a>(
         let (tid, pid) = cached_thread_and_process_id();
         for packet in packets {
             if !packet.meta().discard()
-                && let Some(trace) = packet.trace
+                && let Some(trace) = packet.trace()
             {
                 let _ = publisher.publish(&IngressEvent::Dropped {
                     pid,

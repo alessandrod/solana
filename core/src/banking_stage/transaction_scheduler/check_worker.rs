@@ -43,8 +43,9 @@ fn run_check_worker(
     while let Ok(work) = work_receiver.recv() {
         let banks = sharable_banks.load();
         let trace = work.trace;
-        let result = precheck_transaction(work, &banks.root_bank, &banks.working_bank, &filter_keys)
-            .map_err(|err| (err, trace));
+        let result =
+            precheck_transaction(work, &banks.root_bank, &banks.working_bank, &filter_keys)
+                .map_err(|err| (err, trace));
 
         // A result queue at capacity applies backpressure to check workers. Accepted
         // work is never dropped by a worker.
@@ -57,9 +58,12 @@ fn run_check_worker(
 #[cfg(test)]
 mod tests {
     use {
-        super::*, crate::banking_stage::tests::create_slow_genesis_config,
-        crossbeam_channel::bounded, solana_ledger::genesis_utils::GenesisConfigInfo,
-        solana_perf::packet::{BytesPacket, bytes::Bytes}, solana_runtime::bank::Bank,
+        super::*,
+        crate::banking_stage::tests::create_slow_genesis_config,
+        crossbeam_channel::bounded,
+        solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_perf::packet::{BytesPacket, bytes::Bytes},
+        solana_runtime::bank::Bank,
         solana_system_transaction::transfer,
     };
 
