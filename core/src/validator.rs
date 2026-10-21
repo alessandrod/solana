@@ -1004,9 +1004,13 @@ impl Validator {
 
         let event_system = initialize_event_system(&blockstore)?;
         let event_stream_config = StreamConfig {
-            capacity: 1024,
+            capacity: 100_000,
             publisher_slots: 256,
             subscriber_slots: 8,
+        };
+        let slot_event_stream_config = StreamConfig {
+            capacity: 1024,
+            ..event_stream_config
         };
         let tpu_event_factories = TpuEventFactories {
             ingress: create_event_stream(&event_system, INGRESS_EVENT_STREAM, event_stream_config),
@@ -1035,12 +1039,12 @@ impl Validator {
             scheduler_slots: create_event_stream(
                 &event_system,
                 SCHEDULER_SLOT_EVENT_STREAM,
-                event_stream_config,
+                slot_event_stream_config,
             ),
             broadcast_slots: create_event_stream(
                 &event_system,
                 BROADCAST_SLOT_EVENT_STREAM,
-                event_stream_config,
+                slot_event_stream_config,
             ),
         };
         let poh_transaction_events = create_event_stream(

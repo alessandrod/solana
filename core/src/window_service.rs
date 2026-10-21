@@ -332,7 +332,7 @@ impl WindowService {
             event_system,
             events::FEC_SET_COMPLETED_STREAM,
             StreamConfig {
-                capacity: 1024,
+                capacity: 100_000,
                 publisher_slots: 1,
                 subscriber_slots: 8,
             },

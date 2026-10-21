@@ -280,7 +280,7 @@ impl ShredFetchStage {
             event_system,
             events::SHRED_RECEIVED_STREAM,
             StreamConfig {
-                capacity: 65536,
+                capacity: 100_000,
                 publisher_slots: 2,
                 subscriber_slots: 8,
             },
