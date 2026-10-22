@@ -214,13 +214,16 @@ fn schedule_entries_for_tests(
         })
     });
 
-    process_entries(bank, replay_entries)
+    for hash in schedule_entries(bank, replay_entries)? {
+        bank.register_tick(&hash);
+    }
+    Ok(())
 }
 
-fn process_entries(
+fn schedule_entries(
     bank: &BankWithScheduler,
     entries: impl IntoIterator<Item = result::Result<ReplayEntry, BlockstoreProcessorError>>,
-) -> result::Result<(), BlockstoreProcessorError> {
+) -> result::Result<Vec<Hash>, BlockstoreProcessorError> {
     let mut tick_hashes = vec![];
 
     for entry in entries {
@@ -258,10 +261,7 @@ fn process_entries(
             }
         }
     }
-    for hash in tick_hashes {
-        bank.register_tick(&hash);
-    }
-    Ok(())
+    Ok(tick_hashes)
 }
 
 /// Validate an entry's transactions before scheduling: each transaction's account
@@ -1839,32 +1839,6 @@ fn confirm_slot_entries(
             return Err(err.into());
         }
     };
-    let bank_id = bank.bank_id();
-    if skip_verification {
-        if let Some(replay_vote_sender) = replay_vote_sender {
-            let message_hashes = unverified_signatures.vote_transaction_message_hashes();
-            if !message_hashes.is_empty() {
-                let _ = replay_vote_sender.send(ReplayVoteMessage::Verified {
-                    replay_bank_id: bank_id,
-                    replay_slot: slot,
-                    message_hashes,
-                });
-            }
-        }
-    } else {
-        let replay_vote_sender = replay_vote_sender.cloned();
-        progress
-            .async_verification(replay_verification_worker_pool)
-            .spawn_signature_verification(
-                replay_verification_worker_pool,
-                unverified_signatures,
-                slot,
-                bank_id,
-                starting_transaction_index,
-                replay_vote_sender,
-            )?;
-    }
-
     let mut replay_timer = Measure::start("replay_elapsed");
     let is_vote_only_bank = bank.vote_only_bank();
     let replay_entries =
@@ -1895,11 +1869,46 @@ fn confirm_slot_entries(
                 })
             });
 
-    let process_result = process_entries(bank, replay_entries);
+    let schedule_result = schedule_entries(bank, replay_entries);
     replay_timer.stop();
     *replay_elapsed += replay_timer.as_us();
 
-    process_result?;
+    // Submit signatures before registering ticks, which can wait for execution to finish.
+    // Even a failed dispatch can have enqueued transactions that still need verification.
+    let bank_id = bank.bank_id();
+    if skip_verification {
+        if let Some(replay_vote_sender) = replay_vote_sender {
+            let message_hashes = unverified_signatures.vote_transaction_message_hashes();
+            if !message_hashes.is_empty() {
+                let _ = replay_vote_sender.send(ReplayVoteMessage::Verified {
+                    replay_bank_id: bank_id,
+                    replay_slot: slot,
+                    message_hashes,
+                });
+            }
+        }
+    } else {
+        let replay_vote_sender = replay_vote_sender.cloned();
+        progress
+            .async_verification(replay_verification_worker_pool)
+            .spawn_signature_verification(
+                replay_verification_worker_pool,
+                unverified_signatures,
+                slot,
+                bank_id,
+                starting_transaction_index,
+                replay_vote_sender,
+            )?;
+    }
+
+    let tick_hashes = schedule_result?;
+    let mut replay_timer = Measure::start("replay_elapsed");
+    for hash in tick_hashes {
+        bank.register_tick(&hash);
+    }
+    replay_timer.stop();
+    *replay_elapsed += replay_timer.as_us();
+
     progress
         .collect_available_verification_results(poh_verify_elapsed, transaction_verify_elapsed)?;
 
@@ -5493,6 +5502,158 @@ pub mod tests {
     }
 
     #[test]
+    fn test_confirm_slot_entries_dispatches_before_sigverify_backpressure() {
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config(100 * LAMPORTS_PER_SOL);
+        let genesis_hash = genesis_config.hash();
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let (status_sender, status_receiver) = bounded(0);
+        let pool = DefaultSchedulerPool::new_for_verification(
+            None,
+            None,
+            Some(TransactionStatusSender {
+                sender: status_sender,
+                dependency_tracker: None,
+            }),
+            None,
+            None,
+        );
+        let bank = take_bank_with_scheduler_for_tests(&pool, bank);
+        let verification_pool = ReplayVerificationWorkerPool::with_capacity(1, 1, None);
+
+        // Hold the worker on a result send. The batch's PoH job fills the queue, so
+        // signature submission must wait until this receiver is dropped.
+        let (result_sender, result_receiver) = bounded(0);
+        verification_pool.send(VerificationJob::Poh(PohVerificationJob {
+            entries: Arc::new(VerificationBatch {
+                data: Vec::new(),
+                started: Instant::now(),
+                remaining_jobs: AtomicUsize::new(1),
+            }),
+            range: 0..0,
+            start_hash: genesis_hash,
+            slot: bank.slot(),
+            bank_id: bank.bank_id(),
+            starting_entry_index: 0,
+            result_sender,
+        }));
+        let entry = next_entry(
+            &genesis_hash,
+            1,
+            vec![system_transaction::transfer(
+                &mint_keypair,
+                &Pubkey::new_unique(),
+                1,
+                genesis_hash,
+            )],
+        );
+
+        let status = thread::scope(|scope| {
+            let replay = scope.spawn(|| {
+                let mut progress = ConfirmationProgress::new(genesis_hash);
+                let result = confirm_slot_entries(
+                    &bank,
+                    &verification_pool,
+                    (entry_views_for_tests(vec![entry]), 0, false),
+                    &mut ConfirmationTiming::default(),
+                    &mut progress,
+                    false,
+                    None,
+                    None,
+                    &MigrationStatus::default(),
+                    &mut ReplayEventPublishers::default(),
+                );
+                let (execution_result, _) = bank.wait_for_completed_scheduler().unwrap();
+                let verification_result =
+                    progress.wait_for_all_verification_results(&mut 0, &mut 0);
+                result.unwrap();
+                execution_result.unwrap();
+                verification_result.unwrap();
+            });
+            let status = status_receiver.recv_timeout(Duration::from_secs(5));
+            drop(status_receiver);
+            drop(result_receiver);
+            replay.join().unwrap();
+            status
+        });
+        pool.uninstalled_from_bank_forks();
+
+        assert_matches!(status, Ok(TransactionStatusMessage::Batch(_)));
+    }
+
+    #[test]
+    fn test_confirm_slot_entries_sigverify_precedes_final_tick_wait() {
+        let GenesisConfigInfo {
+            genesis_config,
+            mint_keypair,
+            ..
+        } = create_genesis_config(100 * LAMPORTS_PER_SOL);
+        let genesis_hash = genesis_config.hash();
+        let (bank, _bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let (status_sender, status_receiver) = bounded(0);
+        let pool = DefaultSchedulerPool::new_for_verification(
+            None,
+            None,
+            Some(TransactionStatusSender {
+                sender: status_sender,
+                dependency_tracker: None,
+            }),
+            None,
+            None,
+        );
+        let bank = take_bank_with_scheduler_for_tests(&pool, bank);
+        let verification_pool = ReplayVerificationWorkerPool::new(1, None);
+        let (vote_sender, vote_receiver) = bounded(1);
+        let mut transaction =
+            system_transaction::transfer(&mint_keypair, &Pubkey::new_unique(), 1, genesis_hash);
+        transaction.signatures[0] = solana_signature::Signature::default();
+        let entry = next_entry(&genesis_hash, 1, vec![transaction]);
+        let mut entries = create_ticks(bank.ticks_per_slot(), 0, entry.hash);
+        entries.insert(0, entry);
+
+        let (vote, result) = thread::scope(|scope| {
+            let replay = scope.spawn(|| {
+                let mut progress = ConfirmationProgress::new(genesis_hash);
+                let result = confirm_slot_entries(
+                    &bank,
+                    &verification_pool,
+                    (entry_views_for_tests(entries), 0, true),
+                    &mut ConfirmationTiming::default(),
+                    &mut progress,
+                    false,
+                    None,
+                    Some(&vote_sender),
+                    &MigrationStatus::default(),
+                    &mut ReplayEventPublishers::default(),
+                );
+                let (execution_result, _) = bank.wait_for_completed_scheduler().unwrap();
+                let verification_result =
+                    progress.wait_for_all_verification_results(&mut 0, &mut 0);
+                execution_result.unwrap();
+                result.and(verification_result)
+            });
+            // The handler cannot finish its status send until this receiver is dropped.
+            // Verification must report the bad signature before final-tick registration drains it.
+            let vote = vote_receiver.recv_timeout(Duration::from_secs(5));
+            drop(status_receiver);
+            (vote, replay.join().unwrap())
+        });
+        pool.uninstalled_from_bank_forks();
+
+        assert_matches!(vote, Ok(ReplayVoteMessage::InvalidBank { replay_bank_id, .. })
+            if replay_bank_id == bank.bank_id());
+        assert_matches!(
+            result,
+            Err(BlockstoreProcessorError::InvalidTransaction(
+                TransactionError::SignatureFailure
+            ))
+        );
+    }
+
+    #[test]
     fn test_verification_workers_small_capacity() {
         let num_workers = 2;
         let channel_capacity = 1;
@@ -5777,16 +5938,14 @@ pub mod tests {
             });
         let bank = BankWithScheduler::new(bank, Some(Box::new(mocked_scheduler)));
 
-        // process_batches was removed; drive the same scheduling path through
-        // process_entries with a single transaction entry.
         let replay_entry = ReplayEntry {
             entry: EntryType::Transactions(txs),
             starting_index: 0,
         };
 
-        let result = process_entries(&bank, std::iter::once(Ok(replay_entry)));
+        let result = schedule_entries(&bank, std::iter::once(Ok(replay_entry)));
         if should_succeed {
-            assert_matches!(result, Ok(()));
+            assert!(result.unwrap().is_empty());
         } else {
             assert_matches!(
                 result,
