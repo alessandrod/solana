@@ -516,7 +516,7 @@ where
     F: Fn(UnsanitizedTransactionView<D>) -> Result<Tx> + Send + Sync,
     D: TransactionData + Clone + Send + Sync,
 {
-    const PARALLEL_VERIFY_THRESHOLD: usize = 200;
+    const PARALLEL_VERIFY_THRESHOLD: usize = 0;
     if num_txs < PARALLEL_VERIFY_THRESHOLD {
         let mut unverified_signatures = UnverifiedSignatures::with_capacity(num_txs);
         let entries = entries

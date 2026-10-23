@@ -1244,7 +1244,7 @@ impl ReplayVerificationWorkerPool {
             // poh + signature verification
             .checked_mul(2)
             .unwrap()
-            // each poh/signature batch can be split into multiple jobs, at most 1 for each worker
+            // each verification batch uses at most 1 job for each worker
             .checked_mul(num_workers)
             .expect("verification job queue capacity overflow");
         Self::with_capacity(num_workers, job_capacity, event_factories)
@@ -1311,17 +1311,23 @@ impl AsyncVerificationProgress {
             return Ok(());
         }
         let sender = self.sender.clone();
-        self.send_jobs(worker_pool, entries, item_count, move |range, entries| {
-            VerificationJob::Poh(PohVerificationJob {
-                entries,
-                range,
-                start_hash,
-                slot,
-                bank_id,
-                starting_entry_index,
-                result_sender: sender.clone(),
-            })
-        })
+        self.send_jobs(
+            worker_pool,
+            entries,
+            item_count,
+            1,
+            move |range, entries| {
+                VerificationJob::Poh(PohVerificationJob {
+                    entries,
+                    range,
+                    start_hash,
+                    slot,
+                    bank_id,
+                    starting_entry_index,
+                    result_sender: sender.clone(),
+                })
+            },
+        )
     }
 
     fn spawn_signature_verification(
@@ -1342,6 +1348,7 @@ impl AsyncVerificationProgress {
             worker_pool,
             signatures,
             item_count,
+            worker_pool.inner.num_workers(),
             move |range, signatures| {
                 VerificationJob::Signatures(SignaturesVerificationJob {
                     signatures,
@@ -1361,10 +1368,11 @@ impl AsyncVerificationProgress {
         worker_pool: &ReplayVerificationWorkerPool,
         data: T,
         item_count: usize,
+        max_jobs: usize,
         create_job: impl Fn(Range<usize>, Arc<VerificationBatch<T>>) -> VerificationJob,
     ) -> result::Result<(), BlockstoreProcessorError> {
         debug_assert!(item_count > 0);
-        let job_count = worker_pool.inner.num_workers().min(item_count);
+        let job_count = max_jobs.min(item_count);
         let result_capacity = self.sender.capacity().unwrap();
         assert!(
             self.pending_jobs <= result_capacity,
@@ -1795,24 +1803,14 @@ fn confirm_slot_entries(
     }
 
     let last_entry_hash = entries.last().map(|e| e.hash);
-    if !skip_verification {
-        let start_hash = progress.last_entry;
+    let verify_entries = (!skip_verification).then(|| {
         let verify_entries = entry::entry_views_to_verification_data(&entries);
         datapoint_debug!(
             "verify-batch-size",
             ("size", verify_entries.len() as i64, i64)
         );
-        progress
-            .async_verification(replay_verification_worker_pool)
-            .spawn_poh_verification(
-                replay_verification_worker_pool,
-                verify_entries,
-                start_hash,
-                slot,
-                bank_id,
-                starting_entry_index,
-            )?;
-    }
+        verify_entries
+    });
 
     let validate_and_hash_transaction = {
         let bank = bank.clone_with_scheduler();
@@ -1873,8 +1871,21 @@ fn confirm_slot_entries(
     replay_timer.stop();
     *replay_elapsed += replay_timer.as_us();
 
-    // Submit signatures before registering ticks, which can wait for execution to finish.
+    // Submit verification before registering ticks, which can wait for execution to finish.
     // Even a failed dispatch can have enqueued transactions that still need verification.
+    if let Some(verify_entries) = verify_entries {
+        let start_hash = progress.last_entry;
+        progress
+            .async_verification(replay_verification_worker_pool)
+            .spawn_poh_verification(
+                replay_verification_worker_pool,
+                verify_entries,
+                start_hash,
+                slot,
+                bank_id,
+                starting_entry_index,
+            )?;
+    }
     let bank_id = bank.bank_id();
     if skip_verification {
         if let Some(replay_vote_sender) = replay_vote_sender {
@@ -5502,7 +5513,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_confirm_slot_entries_dispatches_before_sigverify_backpressure() {
+    fn test_confirm_slot_entries_dispatches_before_verification_backpressure() {
         let GenesisConfigInfo {
             genesis_config,
             mint_keypair,
@@ -5524,22 +5535,24 @@ pub mod tests {
         let bank = take_bank_with_scheduler_for_tests(&pool, bank);
         let verification_pool = ReplayVerificationWorkerPool::with_capacity(1, 1, None);
 
-        // Hold the worker on a result send. The batch's PoH job fills the queue, so
-        // signature submission must wait until this receiver is dropped.
+        // Hold the worker on a result send and fill the queue, so verification
+        // submission must wait until this receiver is dropped.
         let (result_sender, result_receiver) = bounded(0);
-        verification_pool.send(VerificationJob::Poh(PohVerificationJob {
-            entries: Arc::new(VerificationBatch {
-                data: Vec::new(),
-                started: Instant::now(),
-                remaining_jobs: AtomicUsize::new(1),
-            }),
-            range: 0..0,
-            start_hash: genesis_hash,
-            slot: bank.slot(),
-            bank_id: bank.bank_id(),
-            starting_entry_index: 0,
-            result_sender,
-        }));
+        for _ in 0..2 {
+            verification_pool.send(VerificationJob::Poh(PohVerificationJob {
+                entries: Arc::new(VerificationBatch {
+                    data: Vec::new(),
+                    started: Instant::now(),
+                    remaining_jobs: AtomicUsize::new(1),
+                }),
+                range: 0..0,
+                start_hash: genesis_hash,
+                slot: bank.slot(),
+                bank_id: bank.bank_id(),
+                starting_entry_index: 0,
+                result_sender: result_sender.clone(),
+            }));
+        }
         let entry = next_entry(
             &genesis_hash,
             1,
@@ -5654,6 +5667,35 @@ pub mod tests {
     }
 
     #[test]
+    fn test_entry_verification_single_job() {
+        let num_workers = 4;
+        let worker_pool =
+            ReplayVerificationWorkerPool::with_capacity(num_workers, num_workers, None);
+        let mut progress = AsyncVerificationProgress::new(worker_pool.job_capacity);
+        let start_hash = Hash::new_unique();
+        let mut entries = create_ticks((num_workers + 1) as u64, 1, start_hash);
+        entries.last_mut().unwrap().hash = Hash::new_unique();
+
+        progress
+            .spawn_poh_verification(
+                &worker_pool,
+                entry::entries_to_verification_data(&entries),
+                start_hash,
+                0,
+                BankId::default(),
+                0,
+            )
+            .unwrap();
+        assert_eq!(progress.pending_jobs, 1);
+        assert_matches!(
+            progress.wait_for_all_results(),
+            Err(BlockstoreProcessorError::InvalidBlock(
+                BlockError::InvalidEntryHash
+            ))
+        );
+    }
+
+    #[test]
     fn test_verification_workers_small_capacity() {
         let num_workers = 2;
         let channel_capacity = 1;
@@ -5691,16 +5733,13 @@ pub mod tests {
         // ideally we'd use MAX_FEC_SETS_PER_SLOT here, but CI is too slow to be true
         let fake_max_fec_sets_per_slot = 10usize;
         let job_capacity = fake_max_fec_sets_per_slot
-            // poh + signature verification
-            .checked_mul(2)
-            .unwrap()
-            // each poh/signature batch can be split into multiple jobs, at most 1 for each worker
-            .checked_mul(num_workers)
+            // one entry-verification job plus up to one signature-verification job per worker
+            .checked_mul(num_workers + 1)
             .expect("verification job queue capacity overflow");
         let worker_pool =
             ReplayVerificationWorkerPool::with_capacity(num_workers, job_capacity, None);
 
-        // make sure that each batch generates work for each worker
+        // Make sure signature verification generates work for each worker.
         let num_items = num_workers + 1;
 
         let start_hash = Hash::new_unique();
