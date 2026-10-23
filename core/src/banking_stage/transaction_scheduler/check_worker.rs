@@ -1,7 +1,6 @@
 use {
     super::receive_and_buffer::{CheckWork, PrecheckResult, precheck_transaction},
     crossbeam_channel::{Receiver, Sender},
-    solana_perf::packet::bytes::Bytes,
     solana_pubkey::Pubkey,
     solana_runtime::bank_forks::SharableBanks,
     std::{
@@ -59,9 +58,12 @@ fn run_check_worker(
 #[cfg(test)]
 mod tests {
     use {
-        super::*, crate::banking_stage::tests::create_slow_genesis_config,
-        crossbeam_channel::bounded, solana_ledger::genesis_utils::GenesisConfigInfo,
-        solana_perf::packet::BytesPacket, solana_runtime::bank::Bank,
+        super::*,
+        crate::banking_stage::tests::create_slow_genesis_config,
+        crossbeam_channel::bounded,
+        solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_perf::packet::{BytesPacket, bytes::Bytes},
+        solana_runtime::bank::Bank,
         solana_system_transaction::transfer,
     };
 

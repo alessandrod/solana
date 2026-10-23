@@ -6,7 +6,7 @@ use {
             simple_qos::{SimpleQos, SimpleQosBanlist, SimpleQosConfig},
             swqos::{SwQos, SwQosConfig},
         },
-        streamer::{ChannelSend, StakedNodes},
+        streamer::StakedNodes,
         transaction_trace::{TracedPacketSender, TransactionTracer},
     },
     crossbeam_channel::Sender,

@@ -63,7 +63,9 @@ impl<S: ChannelSend<PacketBatch>> ChannelSend<PacketBatch> for TracedPacketSende
                 .as_mut()
                 .and_then(|publisher| publisher.is_enabled().then_some(publisher));
             for packet in batch.iter_mut() {
-                let PacketRefMut::Bytes(packet) = packet else { continue };
+                let PacketRefMut::Bytes(packet) = packet else {
+                    continue;
+                };
                 let id = TraceId(
                     NonZeroU64::new(tracer.next_id.fetch_add(1, Ordering::Relaxed))
                         .expect("transaction trace IDs exhausted"),

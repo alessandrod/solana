@@ -586,7 +586,7 @@ impl TaskHandler for DefaultTaskHandler {
                     .unwrap(),
                 ExecutionEventContext {
                     slot: bank.slot(),
-                    bank_id: bank.bank_id().into(),
+                    bank_id: bank.bank_id(),
                     trace_id: task_id.try_into().unwrap(),
                     attempt: 0,
                 },
@@ -1060,7 +1060,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                 tid,
                 timestamp_ns: monotonic_timestamp_ns(),
                 slot: bank.slot(),
-                bank_id: bank.bank_id().into(),
+                bank_id: bank.bank_id(),
                 transaction_index: executed_task.task.task_id().try_into().unwrap(),
             });
         }
@@ -1091,7 +1091,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                     tid,
                     timestamp_ns,
                     slot: bank.slot(),
-                    bank_id: bank.bank_id().into(),
+                    bank_id: bank.bank_id(),
                     transaction_index: executed_task.task.task_id().try_into().unwrap(),
                 });
             }
@@ -1100,7 +1100,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                     publisher,
                     ExecutionEventContext {
                         slot: bank.slot(),
-                        bank_id: bank.bank_id().into(),
+                        bank_id: bank.bank_id(),
                         trace_id: executed_task.task.task_id().try_into().unwrap(),
                         attempt: 0,
                     },
@@ -3562,12 +3562,13 @@ mod tests {
         let result = &mut Ok(());
         let timings = &mut ExecuteTimings::default();
         let scheduling_context = &SchedulingContext::new(bank.clone());
-        let handler_context = &HandlerContext {
-            thread_count: 0,
+        let handler_context = &mut HandlerContext {
             log_messages_bytes_limit: None,
             transaction_status_sender: None,
             replay_vote_sender: None,
             prioritization_fee_cache: None,
+            event_publishers: TransactionEventPublishers::default(),
+            processing_details: None,
         };
 
         let task = SchedulingStateMachine::create_task(ReplayTransaction::from(tx), 0, &mut |_| {

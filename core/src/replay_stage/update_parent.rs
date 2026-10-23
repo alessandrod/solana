@@ -315,6 +315,7 @@ pub(super) fn process_soft_dead_slots(
 /// Handles UpdateParent signals by clearing slot state so replay restarts from
 /// the new parent. Skips live own-leader banks, slots replay has not started,
 /// and slots that already replayed past the UpdateParent marker.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_update_parent_interrupts(
     slot_event_publisher: &mut Publisher<SlotEvent>,
     my_pubkey: &Pubkey,
