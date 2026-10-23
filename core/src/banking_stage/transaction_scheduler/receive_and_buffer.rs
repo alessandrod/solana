@@ -774,8 +774,16 @@ mod tests {
             .unwrap()
             .buffer()
             .clone();
-        let checked =
-            precheck_transaction(bytes.clone(), &root, &working, &HashSet::new()).unwrap();
+        let checked = precheck_transaction(
+            CheckWork {
+                bytes: bytes.clone(),
+                trace: None,
+            },
+            &root,
+            &working,
+            &HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(
             checked.state.transaction().implicit_read_locks().is_empty(),
             root_active

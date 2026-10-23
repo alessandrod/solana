@@ -1098,7 +1098,7 @@ impl PohVerificationJob {
                     tid,
                     timestamp_ns: monotonic_timestamp_ns(),
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                     entry_index: (starting_entry_index + index).try_into().unwrap(),
                 });
             }
@@ -1157,7 +1157,7 @@ impl SignaturesVerificationJob {
                     tid,
                     timestamp_ns: monotonic_timestamp_ns(),
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                     transaction_index: (starting_transaction_index + index).try_into().unwrap(),
                     outcome,
                 });
@@ -1688,7 +1688,7 @@ fn confirm_slot_entries(
                         tid,
                         timestamp_ns,
                         slot,
-                        bank_id: bank_id.into(),
+                        bank_id,
                         entry_index: entry_index.try_into().unwrap(),
                         num_transactions: num_txs.try_into().unwrap(),
                     });
@@ -1703,7 +1703,7 @@ fn confirm_slot_entries(
                             tid,
                             timestamp_ns,
                             slot,
-                            bank_id: bank_id.into(),
+                            bank_id,
                             transaction_index: (entry_tx_starting_index + index)
                                 .try_into()
                                 .unwrap(),
@@ -1717,7 +1717,7 @@ fn confirm_slot_entries(
                                     tid,
                                     timestamp_ns,
                                     slot,
-                                    bank_id: bank_id.into(),
+                                    bank_id,
                                     transaction_index: (entry_tx_starting_index + index)
                                         .try_into()
                                         .unwrap(),

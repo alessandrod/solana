@@ -8,7 +8,7 @@ use {
         streamer::{ChannelSend, StakedNodes},
     },
     bytes::{BufMut, Bytes, BytesMut},
-    crossbeam_channel::{Sender, TrySendError},
+    crossbeam_channel::TrySendError,
     futures::{Future, StreamExt as _, stream::FuturesUnordered},
     indexmap::map::{Entry, IndexMap},
     quinn::{Accept, Connecting, Connection, Endpoint},
