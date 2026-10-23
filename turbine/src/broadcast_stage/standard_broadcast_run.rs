@@ -508,7 +508,7 @@ impl StandardBroadcastRun {
                                 pid,
                                 tid,
                                 timestamp_ns,
-                                bank_id: bank.bank_id().into(),
+                                bank_id: bank.bank_id(),
                                 slot: bank.slot(),
                                 entry_hash: entry.hash.to_bytes(),
                                 data_shred_start,

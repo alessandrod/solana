@@ -356,7 +356,7 @@ impl Consumer {
                 pid,
                 tid,
                 batch_id,
-                bank_id: bank.bank_id().into(),
+                bank_id: bank.bank_id(),
                 start_ns,
                 end_ns,
                 num_transactions: counts.attempted_processing_count,
@@ -400,7 +400,7 @@ impl Consumer {
                         .expect("enabled processing publisher"),
                     ExecutionEventContext {
                         slot: bank.slot(),
-                        bank_id: bank.bank_id().into(),
+                        bank_id: bank.bank_id(),
                         trace_id: trace.id.0.get(),
                         attempt: trace.attempt,
                     },
@@ -519,7 +519,7 @@ impl Consumer {
                     self.instruction_events.as_mut().unwrap(),
                     ExecutionEventContext {
                         slot: bank.slot(),
-                        bank_id: bank.bank_id().into(),
+                        bank_id: bank.bank_id(),
                         trace_id: trace.id.0.get(),
                         attempt: trace.attempt,
                     },

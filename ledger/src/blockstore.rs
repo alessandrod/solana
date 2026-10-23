@@ -2774,6 +2774,7 @@ impl Blockstore {
                 None, // Skip recovery for this direct insertion path.
                 &mut pinnable_slice,
                 &mut write_batch,
+                &mut IngestPublishers::default(),
                 &mut BlockstoreInsertionMetrics::default(),
             )
             .unwrap();

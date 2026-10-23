@@ -1,7 +1,7 @@
 //! Utility to deduplicate batches of incoming network packets.
 
 use {
-    crate::packet::{BytesPacket, PacketBatch},
+    crate::packet::{PacketBatch, PacketRef},
     ahash::RandomState,
     arc_swap::ArcSwap,
     rand::Rng,
@@ -133,7 +133,7 @@ pub fn dedup_packets_and_count_discards<const K: usize>(
 pub fn dedup_packets_and_count_discards_with_on_discard<const K: usize>(
     deduper: &Deduper<K, [u8]>,
     batches: &mut [PacketBatch],
-    mut on_discard: impl FnMut(&BytesPacket),
+    mut on_discard: impl FnMut(PacketRef<'_>),
 ) -> u64 {
     batches
         .iter_mut()
@@ -146,7 +146,7 @@ pub fn dedup_packets_and_count_discards_with_on_discard<const K: usize>(
                     .unwrap_or(true)
             {
                 packet.meta_mut().set_discard(true);
-                on_discard(packet);
+                on_discard(packet.as_ref());
             }
             u64::from(packet.meta().discard())
         })

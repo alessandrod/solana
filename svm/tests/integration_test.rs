@@ -3487,7 +3487,7 @@ fn svm_inspect_nonce_load_failure(fee_paying_nonce: bool) {
         .data_as_mut_slice()
         .copy_from_slice(advanced_nonce_info.account().data());
 
-    let env = SvmTestEnvironment::create(test_entry.clone());
+    let mut env = SvmTestEnvironment::create(test_entry.clone());
     env.execute();
 
     let actual_inspected_accounts = env.mock_bank.inspected_accounts.read().unwrap().clone();

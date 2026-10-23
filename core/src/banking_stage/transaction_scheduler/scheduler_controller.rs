@@ -88,7 +88,7 @@ fn update_scheduling_bank(
                     tid,
                     timestamp_ns,
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                 });
             }
             if let Some((bank_id, slot)) = decision_bank {
@@ -97,7 +97,7 @@ fn update_scheduling_bank(
                     tid,
                     timestamp_ns,
                     slot,
-                    bank_id: bank_id.into(),
+                    bank_id,
                 });
             }
         }

@@ -6,7 +6,7 @@ use {
         publisher::Publisher,
     },
     agave_votor_messages::{
-        certificate::Certificate, consensus_message::VoteMessage, vote::VoteType,
+        certificate::Certificate, consensus_message::VoteMessage,
         wire::VersionedWireConsensusMessage,
     },
     bytes::Bytes,
