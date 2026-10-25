@@ -72,6 +72,7 @@ use {
         quic::{QuicStreamerConfig, SimpleQosQuicStreamerConfig, SwQosQuicStreamerConfig},
     },
     solana_turbine::broadcast_stage::BroadcastStageType,
+    solana_unified_scheduler_pool::DefaultSchedulerPool,
     solana_validator_exit::Exit,
     std::{
         collections::HashSet,
@@ -128,6 +129,23 @@ pub fn execute(
         tvu_sigverify_threads,
         tvu_bls_sigverify_threads,
     } = cli::thread_args::parse_num_threads_args(matches);
+
+    let unified_scheduler_handler_threads =
+        value_t!(matches, "unified_scheduler_handler_threads", usize).ok();
+    let execution_arenas = value_t!(matches, "execution_arenas", usize).ok();
+    if let Some(arena_count) = execution_arenas {
+        let max_execution_arenas = unified_scheduler_handler_threads
+            .unwrap_or_else(DefaultSchedulerPool::default_handler_count)
+            .max(block_production_num_workers.get())
+            .saturating_add(1);
+        if arena_count > max_execution_arenas {
+            Err(format!(
+                "--experimental-execution-arenas must be at most {max_execution_arenas} (the \
+                 larger of the banking worker and unified scheduler handler thread counts, plus \
+                 one)"
+            ))?;
+        }
+    }
 
     let identity_keypair = Arc::new(run_args.identity_keypair);
 
@@ -869,13 +887,8 @@ pub fn execute(
             "block_verification_method",
             BlockVerificationMethod
         ),
-        unified_scheduler_handler_threads: value_t!(
-            matches,
-            "unified_scheduler_handler_threads",
-            usize
-        )
-        .ok(),
-        replay_arenas: value_t!(matches, "replay_arenas", usize).ok(),
+        unified_scheduler_handler_threads,
+        execution_arenas,
         block_production_method: value_t_or_exit!(
             matches,
             "block_production_method",
