@@ -820,6 +820,7 @@ impl BankingSimulator {
             num_workers,
             SchedulerConfig::default(),
             None,
+            None,
             replay_vote_sender,
             None,
             bank_forks.clone(),

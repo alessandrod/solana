@@ -19,6 +19,7 @@ use {
         validator::BlockProductionMethod,
     },
     agave_banking_stage_ingress_types::{BankingPacketReceiver, SchedulerPriorityFloor},
+    agave_jemalloc::{arena_for_worker, group::ArenaGroup, jemalloc::DisableThreadTcacheOnDrop},
     agave_votor::slot_clock::SharedAlpenglowSlotClock,
     crossbeam_channel::{Receiver, Sender, bounded},
     futures::{StreamExt, stream::FuturesUnordered},
@@ -335,6 +336,7 @@ impl LikeClusterInfo for Arc<ClusterInfo> {
 pub struct BankingStage {
     banking_shutdown_signal: CancellationToken,
     worker_exit_signal: Arc<AtomicBool>,
+    worker_thread_arenas: Option<Arc<ArenaGroup>>,
     banking_control_receiver: mpsc::Receiver<BankingControlMsg>,
     tpu_vote_receiver: BankingPacketReceiver,
     gossip_vote_receiver: BankingPacketReceiver,
@@ -363,6 +365,7 @@ impl BankingStage {
         banking_control_receiver: mpsc::Receiver<BankingControlMsg>,
         num_workers: NonZeroUsize,
         scheduler_config: SchedulerConfig,
+        worker_thread_arenas: Option<Arc<ArenaGroup>>,
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: ReplayVoteSender,
         log_messages_bytes_limit: Option<usize>,
@@ -383,6 +386,7 @@ impl BankingStage {
         let manager = BankingStage {
             banking_shutdown_signal: banking_shutdown_signal.clone(),
             worker_exit_signal: Arc::new(AtomicBool::new(false)),
+            worker_thread_arenas,
             banking_control_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -559,6 +563,10 @@ impl BankingStage {
         let mut worker_metrics = Vec::with_capacity(num_workers);
         for (index, work_receiver) in work_receivers.into_iter().enumerate() {
             let id = index as u32;
+            let assigned_arena = self
+                .worker_thread_arenas
+                .as_ref()
+                .map(|arenas| arena_for_worker(arenas, index));
             let consume_worker = ConsumeWorker::new(
                 id,
                 exit.clone(),
@@ -576,7 +584,17 @@ impl BankingStage {
             threads.push(
                 Builder::new()
                     .name(format!("solCoWorker{id:02}"))
-                    .spawn(|| {
+                    .spawn(move || {
+                        let _disable_tcache_on_exit = if let Some(arena) = assigned_arena {
+                            arena
+                                .bind_current_thread_permanently()
+                                .expect("failed to bind banking worker thread to jemalloc arena");
+
+                            Some(DisableThreadTcacheOnDrop::new(arena, index))
+                        } else {
+                            None
+                        };
+
                         if let Err(err) = consume_worker.run() {
                             error!("Internal consume worker error; err={err}");
                         }
@@ -726,6 +744,10 @@ mod external {
             ) in workers.into_iter().enumerate()
             {
                 let id = index as u32;
+                let assigned_arena = self
+                    .worker_thread_arenas
+                    .as_ref()
+                    .map(|arenas| arena_for_worker(arenas, index));
                 let consume_worker = ExternalWorker::new(
                     id,
                     self.worker_exit_signal.clone(),
@@ -744,6 +766,17 @@ mod external {
                     Builder::new()
                         .name(format!("solECoWorker{id:02}"))
                         .spawn(move || {
+                            let _disable_tcache_on_exit = if let Some(arena) = assigned_arena {
+                                arena.bind_current_thread_permanently().expect(
+                                    "failed to bind external banking worker thread to jemalloc \
+                                     arena",
+                                );
+
+                                Some(DisableThreadTcacheOnDrop::new(arena, index))
+                            } else {
+                                None
+                            };
+
                             if let Err(err) = consume_worker.run(pack_to_worker) {
                                 error!("External consume worker error; err={err}");
                             }
@@ -984,6 +1017,7 @@ mod tests {
                 scheduler_pacing: SchedulerPacing::Disabled,
             },
             None,
+            None,
             replay_vote_sender,
             None,
             bank_forks,
@@ -1046,6 +1080,7 @@ mod tests {
             SchedulerConfig {
                 scheduler_pacing: SchedulerPacing::Disabled,
             },
+            None,
             None,
             replay_vote_sender,
             None,
@@ -1199,6 +1234,7 @@ mod tests {
                 SchedulerConfig {
                     scheduler_pacing: SchedulerPacing::Disabled,
                 },
+                None,
                 None,
                 replay_vote_sender,
                 None,
@@ -1355,6 +1391,7 @@ mod tests {
             SchedulerConfig {
                 scheduler_pacing: SchedulerPacing::Disabled,
             },
+            None,
             None,
             replay_vote_sender,
             None,
