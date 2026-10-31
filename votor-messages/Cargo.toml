@@ -45,6 +45,7 @@ solana-short-vec = { workspace = true, features = ["wincode"] }
 solana-signer-store = { workspace = true }
 thiserror = { workspace = true }
 wincode = { workspace = true }
+wincode-dynamic = { workspace = true }
 
 [lints]
 workspace = true
