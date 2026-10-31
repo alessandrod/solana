@@ -16,6 +16,7 @@ use {
         cost_update_service::CostUpdateService,
         drop_bank_service::DropBankService,
         epoch_specs::EpochSpecs,
+        events::create_event_stream,
         repair::{
             block_id_repair_service::BlockIdRepairChannels,
             repair_service::{OutstandingShredRepairs, RepairInfo, RepairServiceChannels},
@@ -28,13 +29,15 @@ use {
     },
     agave_bls_sigverify::{
         bls_sigverifier::{self, SigVerifierChannels, SigVerifierContext},
+        events::VOTE_RECEIVED_STREAM,
         generated_cert_types::GeneratedCertTypes,
         rewards::RewardInput,
     },
-    agave_event_system::EventSystem,
+    agave_event_system::{EventSystem, StreamConfig},
     agave_jemalloc::jemalloc::Arena,
     agave_votor::{
         event::{LatestSwitchRequest, LeaderWindowInfo, VotorEventReceiver, VotorEventSender},
+        events::VOTE_SENT_STREAM,
         peer_list_updater::PeerListService,
         slot_clock::SharedAlpenglowSlotClock,
         vote_history::VoteHistory,
@@ -363,6 +366,15 @@ impl Tvu {
                 peer_list_service.key_updater(),
             );
         }
+        let vote_event_stream_config = StreamConfig {
+            capacity: 100_000,
+            publisher_slots: 1,
+            subscriber_slots: 8,
+        };
+        let vote_received_events =
+            create_event_stream(event_system, VOTE_RECEIVED_STREAM, vote_event_stream_config);
+        let vote_sent_events =
+            create_event_stream(event_system, VOTE_SENT_STREAM, vote_event_stream_config);
         let votor_ban_sender = endpoint.ban_sender();
         let bls_sigverifier = bls_sigverifier::spawn_service(
             exit.clone(),
@@ -384,6 +396,7 @@ impl Tvu {
                 consensus_message_sender,
                 consensus_metrics_sender.clone(),
             ),
+            Some(vote_received_events),
         );
 
         let (fetch_sender, fetch_receiver) = EvictingSender::new_bounded(SHRED_FETCH_CHANNEL_SIZE);
@@ -647,6 +660,7 @@ impl Tvu {
             cluster_info.clone(),
             votor_egress,
             highest_finalized,
+            Some(vote_sent_events),
         );
 
         let warm_quic_cache_service =
