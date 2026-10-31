@@ -155,7 +155,7 @@ impl TestContext {
             channel_to_metrics,
         );
         let exit = Arc::new(AtomicBool::new(false));
-        let service = spawn_service(exit.clone(), context, channels);
+        let service = spawn_service(exit.clone(), context, channels, None);
         Self {
             validator_keypairs,
             service: Some(service),

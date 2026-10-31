@@ -93,6 +93,7 @@ version = "4.5.0-alpha.4"
 dependencies = [
  "agave-bls-cert-verify",
  "agave-bls-sigverify",
+ "agave-event-system",
  "agave-logger",
  "agave-math-utils",
  "agave-votor-messages",
@@ -549,6 +550,7 @@ name = "agave-votor"
 version = "4.5.0-alpha.4"
 dependencies = [
  "agave-bls-sigverify",
+ "agave-event-system",
  "agave-logger",
  "agave-math-utils",
  "agave-votor",
@@ -618,6 +620,7 @@ dependencies = [
  "solana-signer-store",
  "thiserror 2.0.21",
  "wincode",
+ "wincode-dynamic",
 ]
 
 [[package]]

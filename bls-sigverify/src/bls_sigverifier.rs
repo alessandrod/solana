@@ -5,6 +5,7 @@ use {
         bls_cert_sigverify::{CertPayload, verify_and_send_certificates},
         bls_vote_sigverify::{batch::Batch, verify_and_send_votes},
         errors::SigVerifyError,
+        events::VoteReceived,
         generated_cert_types::GeneratedCertTypes,
         metric_types::ConsensusMetricsEventSender,
         pubkeys::VerifiedVotorSlotsMessage,
@@ -15,6 +16,11 @@ use {
         unverified_votes_batch::UnverifiedVotePayload,
         vote_pool::{VotePool, VotePoolError},
     },
+    agave_event_system::{
+        PublisherFactory,
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
+    },
     agave_votor_messages::{
         certificate::CertificateType,
         consensus_message::Block,
@@ -22,7 +28,7 @@ use {
         unverified_vote_message::{
             DecodedWireConsensusMessage, UnverifiedCertificate, UnverifiedVoteMessage,
         },
-        vote::Vote,
+        vote::{Vote, VoteType},
         wire::{VersionedWireConsensusMessage, VotePayloadToSign},
     },
     agave_votor_transport::endpoint::{BanSender, Datagram},
@@ -126,12 +132,18 @@ pub fn spawn_service(
     exit: Arc<AtomicBool>,
     context: SigVerifierContext,
     channels: SigVerifierChannels,
+    vote_events: Option<PublisherFactory<VoteReceived>>,
 ) -> thread::JoinHandle<()> {
-    let verifier = SigVerifier::new(context, channels);
+    let mut verifier = SigVerifier::new(context, channels);
 
     Builder::new()
         .name("solSigVerBLS".to_string())
-        .spawn(move || verifier.run(exit))
+        .spawn(move || {
+            verifier.vote_events = vote_events
+                .and_then(|factory| factory.try_create_publisher())
+                .unwrap_or_else(Publisher::stub);
+            verifier.run(exit)
+        })
         .unwrap()
 }
 
@@ -154,6 +166,7 @@ struct SigVerifier {
     generated_cert_types: Arc<GeneratedCertTypes>,
     vote_pool: VotePool,
     rank_map_cache: RankMapCache,
+    vote_events: Publisher<VoteReceived>,
 }
 
 impl SigVerifier {
@@ -188,6 +201,7 @@ impl SigVerifier {
             thread_pool,
             generated_cert_types,
             rank_map_cache: RankMapCache::default(),
+            vote_events: Publisher::stub(),
         }
     }
 
@@ -355,6 +369,19 @@ impl SigVerifier {
 
             match decoded_msg {
                 DecodedWireConsensusMessage::Vote(unverified_vote) => {
+                    if sender_identity_pubkey != my_pubkey && self.vote_events.is_enabled() {
+                        let vote = &unverified_vote.vote;
+                        let (tid, pid) = cached_thread_and_process_id();
+                        let _ = self.vote_events.publish(&VoteReceived {
+                            pid,
+                            tid,
+                            timestamp_ns: monotonic_timestamp_ns(),
+                            identity: sender_identity_pubkey.to_bytes(),
+                            slot: vote.slot(),
+                            vote_type: VoteType::from(vote),
+                            block_id: vote.block_id().map_or([0; 32], |id| *id.as_bytes()),
+                        });
+                    }
                     self.extract_and_filter_vote(
                         my_pubkey,
                         *sender_identity_pubkey,

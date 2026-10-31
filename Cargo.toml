@@ -598,6 +598,7 @@ uriparse = "0.6.4"
 url = "2.5.8"
 winapi = "0.3.8"
 wincode = { version = "0.6.3", features = ["derive"] }
+wincode-dynamic = "0.3.1"
 winreg = "0.55"
 xxhash-rust = "0.8.5"
 zstd = "0.14.3"

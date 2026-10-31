@@ -1,6 +1,6 @@
 use {
     crate::{event::VotorEvent, voting_service::BLSOp},
-    agave_votor_messages::vote::Vote,
+    agave_votor_messages::vote::VoteType,
     solana_clock::Slot,
     solana_metrics::datapoint_info,
     std::{
@@ -10,29 +10,6 @@ use {
 };
 
 const STATS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum VoteType {
-    Finalize,
-    Notarize,
-    NotarizeFallback,
-    Skip,
-    SkipFallback,
-    Genesis,
-}
-
-impl From<&Vote> for VoteType {
-    fn from(vote: &Vote) -> Self {
-        match vote {
-            Vote::Notarize(_) => VoteType::Notarize,
-            Vote::NotarizeFallback(_) => VoteType::NotarizeFallback,
-            Vote::Skip(_) => VoteType::Skip,
-            Vote::SkipFallback(_) => VoteType::SkipFallback,
-            Vote::Finalize(_) => VoteType::Finalize,
-            Vote::Genesis(_) => VoteType::Genesis,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 struct SlotTracking {

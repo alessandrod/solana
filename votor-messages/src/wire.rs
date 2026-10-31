@@ -409,6 +409,29 @@ impl VersionedWireConsensusMessage {
             Self::V1(v1) => v1.slot(),
         }
     }
+
+    /// Returns the vote carried by this message, or `None` for a certificate.
+    pub fn vote(&self) -> Option<Vote> {
+        let Self::V1(message) = self;
+        match &message.kind {
+            WireConsensusMessageKind::NotarVote(v) => Some(Vote::new_notarization_vote(v.block)),
+            WireConsensusMessageKind::FinalizeVote(v) => Some(Vote::new_finalization_vote(v.slot)),
+            WireConsensusMessageKind::SkipVote(v) => Some(Vote::new_skip_vote(v.slot)),
+            WireConsensusMessageKind::NotarFallbackVote(v) => {
+                Some(Vote::new_notarization_fallback_vote(v.block))
+            }
+            WireConsensusMessageKind::SkipFallbackVote(v) => {
+                Some(Vote::new_skip_fallback_vote(v.slot))
+            }
+            WireConsensusMessageKind::GenesisVote(v) => Some(Vote::new_genesis_vote(v.block)),
+            WireConsensusMessageKind::FinalizeCert(_)
+            | WireConsensusMessageKind::FastFinalizeCert(_)
+            | WireConsensusMessageKind::NotarCert(_)
+            | WireConsensusMessageKind::NotarFallbackCert(_)
+            | WireConsensusMessageKind::SkipCert(_)
+            | WireConsensusMessageKind::GenesisCert(_) => None,
+        }
+    }
 }
 
 #[cfg_attr(

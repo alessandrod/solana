@@ -2,6 +2,8 @@
 use {
     crate::consensus_message::{Block, BlockId},
     solana_clock::Slot,
+    wincode::{SchemaRead, SchemaWrite},
+    wincode_dynamic::{DynPrimitiveTy, PrimitiveTy},
 };
 
 /// Enum that clients can use to parse and create the vote
@@ -20,6 +22,40 @@ pub enum Vote {
     SkipFallback(SkipFallbackVote),
     /// A genesis vote, only used during the TowerBFT -> Alpenglow Migration
     Genesis(GenesisVote),
+}
+
+/// The type of a consensus vote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SchemaRead, SchemaWrite)]
+pub enum VoteType {
+    /// A finalization vote.
+    Finalize,
+    /// A notarization vote.
+    Notarize,
+    /// A notarization fallback vote.
+    NotarizeFallback,
+    /// A skip vote.
+    Skip,
+    /// A skip fallback vote.
+    SkipFallback,
+    /// A genesis vote used during the migration to Alpenglow.
+    Genesis,
+}
+
+impl DynPrimitiveTy for VoteType {
+    const TYPE: PrimitiveTy = PrimitiveTy::U32;
+}
+
+impl From<&Vote> for VoteType {
+    fn from(vote: &Vote) -> Self {
+        match vote {
+            Vote::Notarize(_) => VoteType::Notarize,
+            Vote::NotarizeFallback(_) => VoteType::NotarizeFallback,
+            Vote::Skip(_) => VoteType::Skip,
+            Vote::SkipFallback(_) => VoteType::SkipFallback,
+            Vote::Finalize(_) => VoteType::Finalize,
+            Vote::Genesis(_) => VoteType::Genesis,
+        }
+    }
 }
 
 impl Vote {
