@@ -1,5 +1,11 @@
 //! Vote data types for use by clients
-use {crate::consensus_message::Block, solana_clock::Slot, solana_hash::Hash};
+use {
+    crate::consensus_message::Block,
+    solana_clock::Slot,
+    solana_hash::Hash,
+    wincode::{SchemaRead, SchemaWrite},
+    wincode_dynamic::{DynPrimitiveTy, PrimitiveTy},
+};
 
 /// Enum that clients can use to parse and create the vote
 /// structures expected by the program
@@ -20,7 +26,7 @@ pub enum Vote {
 }
 
 /// Enum of different types of [`Vote`]s.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, SchemaRead, SchemaWrite)]
 pub enum VoteType {
     /// Finalize vote.
     Finalize,
@@ -34,6 +40,10 @@ pub enum VoteType {
     SkipFallback,
     /// Genesis vote.
     Genesis,
+}
+
+impl DynPrimitiveTy for VoteType {
+    const TYPE: PrimitiveTy = PrimitiveTy::U32;
 }
 
 impl Vote {

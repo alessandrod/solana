@@ -1,6 +1,12 @@
 use {
+    crate::events::VoteSent,
+    agave_event_system::{
+        PublisherFactory,
+        event_metadata::{cached_thread_and_process_id, monotonic_timestamp_ns},
+        publisher::Publisher,
+    },
     agave_votor_messages::{
-        certificate::Certificate, consensus_message::VoteMessage,
+        certificate::Certificate, consensus_message::VoteMessage, vote::VoteType,
         wire::VersionedWireConsensusMessage,
     },
     bytes::Bytes,
@@ -205,11 +211,15 @@ impl VotingService {
         cluster_info: Arc<ClusterInfo>,
         egress: mpsc::Sender<Bytes>,
         highest_finalized: Arc<RwLock<Option<ValidatedBlockFinalizationCert>>>,
+        vote_events: Option<PublisherFactory<VoteSent>>,
     ) -> Self {
         let mut standstill_queue = StandstillRefreshQueue::default();
         let thread_hdl = Builder::new()
             .name("solVotorVoteSvc".to_string())
             .spawn(move || {
+                let mut vote_events = vote_events
+                    .and_then(|factory| factory.try_create_publisher())
+                    .unwrap_or_else(Publisher::stub);
                 info!("AlpenglowVotingService has started");
                 loop {
                     Self::maybe_handle_standstill_queue(
@@ -217,6 +227,7 @@ impl VotingService {
                         highest_finalized.as_ref(),
                         &cluster_info,
                         &egress,
+                        &mut vote_events,
                     );
 
                     let bls_op = match bls_receiver.recv_timeout(STANDSTILL_REFRESH_INTERVAL) {
@@ -224,7 +235,13 @@ impl VotingService {
                         Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => continue,
                     };
-                    Self::handle_bls_op(&cluster_info, bls_op, &egress, &mut standstill_queue);
+                    Self::handle_bls_op(
+                        &cluster_info,
+                        bls_op,
+                        &egress,
+                        &mut standstill_queue,
+                        &mut vote_events,
+                    );
                 }
                 info!("AlpenglowVotingService has stopped");
             })
@@ -238,6 +255,7 @@ impl VotingService {
         highest_finalized: &RwLock<Option<ValidatedBlockFinalizationCert>>,
         cluster_info: &ClusterInfo,
         egress: &mpsc::Sender<Bytes>,
+        vote_events: &mut Publisher<VoteSent>,
     ) {
         if !standstill_queue.should_refresh() {
             return;
@@ -266,7 +284,7 @@ impl VotingService {
                     certificate,
                     cluster_info.my_shred_version(),
                 );
-                Self::broadcast_consensus_message(&message, egress);
+                Self::broadcast_consensus_message(&message, egress, cluster_info, vote_events);
                 num_sent_messages = num_sent_messages.saturating_add(1);
             }
         }
@@ -274,7 +292,7 @@ impl VotingService {
         // Refresh the next messages from the queue while adhering to the budget
         let remaining_budget = STANDSTILL_REFRESH_BATCH_SIZE.saturating_sub(num_sent_messages);
         standstill_queue.for_next_n_messages(remaining_budget, |message| {
-            Self::broadcast_consensus_message(message, egress);
+            Self::broadcast_consensus_message(message, egress, cluster_info, vote_events);
         });
 
         standstill_queue.reset_refresh_timer();
@@ -285,6 +303,8 @@ impl VotingService {
     fn broadcast_consensus_message(
         message: &VersionedWireConsensusMessage,
         egress: &mpsc::Sender<Bytes>,
+        cluster_info: &ClusterInfo,
+        vote_events: &mut Publisher<VoteSent>,
     ) {
         let buf = match wincode::serialize(message) {
             Ok(buf) => Bytes::from(buf),
@@ -297,7 +317,22 @@ impl VotingService {
         // Drop on full / closed channel: votor consensus tolerates loss, we
         // never want to backpressure into consensus, but will shout loudly.
         match egress.try_send(buf) {
-            Ok(()) => {}
+            Ok(()) => {
+                if vote_events.is_enabled()
+                    && let Some(vote) = message.vote()
+                {
+                    let (tid, pid) = cached_thread_and_process_id();
+                    let _ = vote_events.publish(&VoteSent {
+                        pid,
+                        tid,
+                        timestamp_ns: monotonic_timestamp_ns(),
+                        identity: cluster_info.id().to_bytes(),
+                        slot: vote.slot(),
+                        vote_type: vote.get_type(),
+                        block_id: vote.block_id().map_or([0; 32], |id| id.to_bytes()),
+                    });
+                }
+            }
             Err(TrySendError::Full(_)) => {
                 error!("alpenglow transport egress channel full; dropping votes/certs!");
             }
@@ -313,6 +348,7 @@ impl VotingService {
         bls_op: BLSOp,
         egress: &mpsc::Sender<Bytes>,
         standstill_queue: &mut StandstillRefreshQueue,
+        vote_events: &mut Publisher<VoteSent>,
     ) {
         match bls_op {
             BLSOp::PushVote { vote } => {
@@ -320,7 +356,7 @@ impl VotingService {
                     Arc::unwrap_or_clone(vote),
                     cluster_info.my_shred_version(),
                 );
-                Self::broadcast_consensus_message(&msg, egress);
+                Self::broadcast_consensus_message(&msg, egress, cluster_info, vote_events);
             }
             BLSOp::PushCertificates { certificates } => {
                 for certificate in certificates {
@@ -328,7 +364,7 @@ impl VotingService {
                         Arc::unwrap_or_clone(certificate),
                         cluster_info.my_shred_version(),
                     );
-                    Self::broadcast_consensus_message(&msg, egress);
+                    Self::broadcast_consensus_message(&msg, egress, cluster_info, vote_events);
                 }
             }
             BLSOp::RefreshVotes { votes } => {
@@ -630,6 +666,7 @@ mod tests {
                 cluster_info.clone(),
                 egress,
                 Arc::new(RwLock::new(None)),
+                None,
             ),
             peer_list_service,
             validator_keypairs,
