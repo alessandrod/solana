@@ -107,7 +107,7 @@ pub struct BytesPacket {
     buffer: Bytes,
     meta: Meta,
     #[serde(skip)]
-    #[cfg_attr(feature = "stable-abi", stable_abi_sample(skip))]
+    #[cfg_attr(feature = "frozen-abi", stable_abi_sample(with = "None"))]
     pub trace: Option<TransactionTraceContext>,
 }
 
@@ -407,6 +407,14 @@ impl<'a> From<&'a mut BytesPacket> for PacketRef<'a> {
 }
 
 impl<'a> PacketRef<'a> {
+    #[inline]
+    pub fn transaction_trace(&self) -> Option<TransactionTraceContext> {
+        match self {
+            Self::Packet(_) => None,
+            Self::Bytes(packet) => packet.trace,
+        }
+    }
+
     pub fn data<I>(&self, index: I) -> Option<&'a <I as SliceIndex<[u8]>>::Output>
     where
         I: SliceIndex<[u8]>,
@@ -931,9 +939,32 @@ impl<'a> IntoParallelIterator for &'a mut BytesPacketBatch {
 #[cfg(test)]
 mod tests {
     use {
-        super::*, solana_hash::Hash, solana_keypair::Keypair, solana_signer::Signer,
-        solana_system_transaction::transfer,
+        super::*, solana_hash::Hash, solana_keypair::Keypair,
+        solana_runtime_transaction::transaction_trace::TraceId, solana_signer::Signer,
+        solana_system_transaction::transfer, std::num::NonZeroU64,
     };
+
+    #[test]
+    fn test_packet_batch_preserves_transaction_trace() {
+        let trace = TransactionTraceContext {
+            id: TraceId(NonZeroU64::new(1).unwrap()),
+            attempt: 2,
+        };
+        let mut packet = BytesPacket::empty();
+        packet.trace = Some(trace);
+
+        for batch in [PacketBatch::Single(packet.clone()), vec![packet].into()] {
+            let mut batch = batch.clone();
+            let packet = batch.iter_mut().next().unwrap();
+            assert_eq!(packet.as_ref().transaction_trace(), Some(trace));
+            assert_eq!(packet.as_ref().to_bytes_packet().trace, Some(trace));
+        }
+
+        assert_eq!(
+            PacketRef::from(&Packet::default()).transaction_trace(),
+            None
+        );
+    }
 
     #[test]
     fn test_to_packet_batches() {

@@ -2,7 +2,7 @@
 //! By default, signatures are verified in parallel using all available CPU
 //! cores.
 use {
-    crate::packet::{PacketBatch, PacketFlags, PacketRefMut},
+    crate::packet::{PacketBatch, PacketFlags, PacketRef, PacketRefMut},
     agave_transaction_view::{
         transaction_data::TransactionData, transaction_version::TransactionVersion,
         transaction_view::SanitizedTransactionView,

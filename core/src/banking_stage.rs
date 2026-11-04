@@ -1374,6 +1374,8 @@ mod tests {
             BlockProductionMethod::CentralSchedulerGreedy,
             poh_recorder,
             transaction_recorder,
+            None,
+            None,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,

@@ -13,10 +13,7 @@ use {
     solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost},
     solana_measure::measure::Measure,
     solana_program_runtime::invoke_context::InstructionExecutionDetails,
-    solana_runtime_transaction::{
-        recording_transaction::RecordingTransaction,
-        transaction_with_meta::{TransactionWithMeta, writable_accounts},
-    },
+    solana_runtime_transaction::transaction_with_meta::{TransactionWithMeta, writable_accounts},
     solana_signature::Signature,
     solana_svm::{
         events::TransactionProcessingDetails,

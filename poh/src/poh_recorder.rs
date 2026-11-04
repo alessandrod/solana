@@ -453,7 +453,7 @@ impl PohRecorder {
                                     timestamp_ns: monotonic_timestamp_ns(),
                                     trace_id: trace.id.0.get(),
                                     attempt: trace.attempt,
-                                    bank_id: bank_id.into(),
+                                    bank_id,
                                     entry_hash: entry.hash.to_bytes(),
                                 });
                             }
